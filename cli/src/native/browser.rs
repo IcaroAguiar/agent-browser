@@ -476,6 +476,54 @@ pub struct BrowserManager {
 /// errors, so scripts using `--json` can match on it.
 pub const TAB_GONE_PREFIX: &str = "tab_gone:";
 
+/// Stable machine-readable prefix for "the active tab stopped responding"
+/// errors (#1713). The message says whether the tab was replaced.
+pub const PAGE_WEDGED_PREFIX: &str = "page_wedged:";
+
+/// What happened to a tab whose renderer stopped answering.
+pub struct WedgeReport {
+    pub target_id: String,
+    pub last_url: String,
+    /// Target of the blank tab that took its slot; `None` when the tab was
+    /// left alone (attached browser, or the browser itself did not answer).
+    pub replacement_target_id: Option<String>,
+}
+
+impl WedgeReport {
+    pub fn error_message(&self) -> String {
+        let url = if self.last_url.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", self.last_url)
+        };
+        match self.replacement_target_id {
+            Some(_) => format!(
+                "{} the active tab{} stopped responding and was replaced by a blank tab; \
+                 navigate again to continue",
+                PAGE_WEDGED_PREFIX, url
+            ),
+            None => format!(
+                "{} the active tab{} stopped responding; close it or switch tabs to continue",
+                PAGE_WEDGED_PREFIX, url
+            ),
+        }
+    }
+
+    pub fn data(&self) -> Value {
+        let mut data = json!({
+            "targetId": self.target_id,
+            "replaced": self.replacement_target_id.is_some(),
+        });
+        if !self.last_url.is_empty() {
+            data["lastUrl"] = json!(self.last_url);
+        }
+        if let Some(ref id) = self.replacement_target_id {
+            data["newTargetId"] = json!(id);
+        }
+        data
+    }
+}
+
 fn tab_gone_error(target_id: &str, last_url: &str) -> String {
     let url_part = if last_url.is_empty() {
         String::new()
@@ -955,6 +1003,96 @@ impl BrowserManager {
         )
         .await
         .is_ok()
+    }
+
+    /// Called after a command on the active tab hit the CDP timeout. If the
+    /// renderer still does not answer the liveness probe (and no dialog is
+    /// holding it), the tab is wedged, for example by `while(true){}`: its
+    /// renderer never yields, so every later command would time out too.
+    ///
+    /// For a daemon-launched browser the wedged target is closed from the
+    /// browser endpoint, which still answers, and a blank tab takes its slot
+    /// (same tab id and label). Attached browsers keep their tab: it belongs
+    /// to the user, and they are the only ones `--pin-tab` applies to.
+    /// Returns `None` when the tab is not wedged.
+    pub async fn handle_command_timeout(
+        &mut self,
+        dialog_session: Option<&str>,
+    ) -> Option<WedgeReport> {
+        if self.direct_page {
+            return None;
+        }
+        let page = self.pages.get(self.active_page_index)?;
+        let (session_id, target_id) = (page.session_id.clone(), page.target_id.clone());
+        let last_url = tab_binding::sanitize_url(&page.url);
+        if dialog_session == Some(session_id.as_str())
+            || self
+                .renderer_responds(&session_id, RENDERER_PROBE_TIMEOUT_MS)
+                .await
+        {
+            return None;
+        }
+        let mut report = WedgeReport {
+            target_id: target_id.clone(),
+            last_url,
+            replacement_target_id: None,
+        };
+        if self.browser_process.is_none() {
+            return Some(report);
+        }
+        // Create first: the replacement must exist before the wedged tab
+        // closes, or closing the last tab would close the browser.
+        let Ok(replacement) = self.open_blank_target().await else {
+            return Some(report);
+        };
+        let _ = self
+            .client
+            .send_command_typed::<_, Value>(
+                "Target.closeTarget",
+                &CloseTargetParams {
+                    target_id: target_id.clone(),
+                },
+                None,
+            )
+            .await;
+        let was_bound = self.bound_target_id.as_deref() == Some(target_id.as_str());
+        let page = &mut self.pages[self.active_page_index];
+        page.url = "about:blank".to_string();
+        page.title.clear();
+        page.target_id = replacement.0.clone();
+        page.session_id = replacement.1;
+        if was_bound {
+            self.bind_active_target();
+        }
+        report.replacement_target_id = Some(replacement.0);
+        Some(report)
+    }
+
+    /// Create and attach a blank target, returning `(target_id, session_id)`.
+    async fn open_blank_target(&self) -> Result<(String, String), String> {
+        let created: CreateTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.createTarget",
+                &CreateTargetParams {
+                    url: "about:blank".to_string(),
+                },
+                None,
+            )
+            .await?;
+        let attach: AttachToTargetResult = self
+            .client
+            .send_command_typed(
+                "Target.attachToTarget",
+                &AttachToTargetParams {
+                    target_id: created.target_id.clone(),
+                    flatten: true,
+                },
+                None,
+            )
+            .await?;
+        self.enable_domains(&attach.session_id).await?;
+        Ok((created.target_id, attach.session_id))
     }
 
     /// Ensure the tab's renderer can serve commands. A non-responsive renderer

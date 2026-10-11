@@ -13022,3 +13022,84 @@ async fn e2e_mouse_interpolation_starts_at_last_element_interaction() {
     }
     assert_success(&execute_command(&json!({"id": "99", "action": "close"}), &mut state).await);
 }
+
+// ---------------------------------------------------------------------------
+// Wedged page recovery (#1713)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_wedged_page_is_replaced_and_session_recovers() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>spin</title>spin" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let tabs_before = state.browser.as_ref().unwrap().tab_list().len();
+
+    let started = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "while(true){}" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "wedging eval must fail: {}", resp);
+    assert_eq!(resp["code"], "page_wedged", "got: {}", resp);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(40),
+        "wedge must surface within one CDP timeout plus probe, took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        state.browser.as_ref().unwrap().tab_list().len(),
+        tabs_before
+    );
+
+    // The client's read timeout can expire before the replacement finishes.
+    // A retry of the same request gets the report, not the blank tab's URL.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "while(true){}" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["code"], "page_wedged",
+        "retry replays the report: {}",
+        resp
+    );
+
+    // A different command runs on the replacement and carries the report once.
+    let started = std::time::Instant::now();
+    let resp = execute_command(&json!({ "id": "4", "action": "url" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["url"], "about:blank");
+    assert!(resp["warning"]
+        .as_str()
+        .unwrap_or("")
+        .starts_with("page_wedged:"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let resp = execute_command(&json!({ "id": "5", "action": "url" }), &mut state).await;
+    assert!(
+        resp.get("warning").is_none(),
+        "report is shown once: {}",
+        resp
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "navigate", "url": "data:text/html,<title>ok</title>ok" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

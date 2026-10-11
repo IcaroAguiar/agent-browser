@@ -15,7 +15,7 @@ use crate::validation::{is_valid_session_name, session_name_error};
 
 use super::a11y;
 use super::auth;
-use super::browser::{should_track_target, BrowserManager, WaitUntil};
+use super::browser::{should_track_target, BrowserManager, WaitUntil, WedgeReport};
 use super::cdp::chrome::{prepare_nss_home, LaunchOptions};
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -620,6 +620,11 @@ pub struct DaemonState {
     pub input_mode: String,
     /// Tracks the currently open JavaScript dialog (alert/confirm/prompt), if any.
     pub pending_dialog: Option<PendingDialog>,
+    /// A `page_wedged` report whose response may not have reached the client,
+    /// keyed by the request id. The client's read timeout can expire before
+    /// the daemon finishes replacing the tab, so a retry of the same request
+    /// gets the report instead of running on the blank replacement tab.
+    pub undelivered_wedge: Option<(String, WedgeReport)>,
     /// A mouse button left logically down because a dialog opened between
     /// mousePressed and mouseReleased; released when the dialog is resolved.
     pub pending_pointer_release: Option<super::interaction::PendingRelease>,
@@ -676,6 +681,11 @@ fn default_idle_shutdown_is_blocked(
 }
 
 impl DaemonState {
+    /// The client received the `page_wedged` response, so it is not replayed.
+    pub fn wedge_report_delivered(&mut self) {
+        self.undelivered_wedge = None;
+    }
+
     pub fn new() -> Self {
         let session_id =
             env::var("AGENT_BROWSER_SESSION").unwrap_or_else(|_| "default".to_string());
@@ -748,6 +758,7 @@ impl DaemonState {
             mouse_state: MouseState::default(),
             input_mode: "instant".to_string(),
             pending_dialog: None,
+            undelivered_wedge: None,
             pending_pointer_release: None,
             auto_dialog: !matches!(
                 env::var("AGENT_BROWSER_NO_AUTO_DIALOG").as_deref(),
@@ -2682,6 +2693,18 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     let cmd_start = std::time::Instant::now();
 
+    // A retry of the request that wedged the tab must not run on its blank
+    // replacement: `url` would report about:blank as a success.
+    let previous_wedge = match state.undelivered_wedge.take() {
+        Some((wedged_id, report)) if wedged_id == id => {
+            let mut resp = error_response(&id, &report.error_message());
+            resp["data"] = report.data();
+            state.undelivered_wedge = Some((wedged_id, report));
+            return resp;
+        }
+        other => other.map(|(_, report)| report),
+    };
+
     if let Err(err) = validate_restore_config_from_command(cmd) {
         return error_response(&id, &err);
     }
@@ -3186,11 +3209,37 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         None
     };
 
-    let mut resp = match result {
-        Ok(data) => success_response(&id, data),
-        Err(e) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
+    let mut wedge = None;
+    if let Err(ref e) = result {
+        if e.contains("CDP command timed out") {
+            let dialog_session = state
+                .pending_dialog
+                .as_ref()
+                .and_then(|d| d.session_id.clone());
+            if let Some(mgr) = state.browser.as_mut() {
+                wedge = mgr.handle_command_timeout(dialog_session.as_deref()).await;
+            }
+        }
+    }
+
+    let mut resp = match (result, &wedge) {
+        (_, Some(report)) => {
+            let mut resp = error_response(&id, &report.error_message());
+            resp["data"] = report.data();
+            resp
+        }
+        (Ok(data), None) => success_response(&id, data),
+        (Err(e), None) => error_response(&id, &super::browser::to_ai_friendly_error(&e)),
     };
     attach_tab_gone_data(&mut resp, state);
+    if let Some(report) = wedge {
+        state.undelivered_wedge = Some((id.clone(), report));
+    } else if let Some(report) = previous_wedge {
+        // The wedged command's response never reached the client.
+        if let Some(obj) = resp.as_object_mut() {
+            obj.insert("warning".to_string(), json!(report.error_message()));
+        }
+    }
 
     // A failed binding write is retried on the next command, but a pinned
     // session must know its isolation may not survive a daemon restart.
@@ -13661,6 +13710,8 @@ fn error_response(id: &str, error: &str) -> Value {
     // using --json can match on it instead of parsing the message.
     if error.starts_with(super::browser::TAB_GONE_PREFIX) {
         resp["code"] = json!("tab_gone");
+    } else if error.starts_with(super::browser::PAGE_WEDGED_PREFIX) {
+        resp["code"] = json!("page_wedged");
     } else if let Some((code, _)) = error.split_once(": ") {
         if code.starts_with("webmcp_") {
             resp["code"] = json!(code);
