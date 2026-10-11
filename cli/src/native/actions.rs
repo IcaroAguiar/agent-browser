@@ -3006,7 +3006,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         }
     }
 
-    let result = match action {
+    let mut result = match action {
         "launch" => {
             let webmcp_enabled = cmd
                 .get("webmcp")
@@ -3218,6 +3218,15 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 .and_then(|d| d.session_id.clone());
             if let Some(mgr) = state.browser.as_mut() {
                 wedge = mgr.handle_command_timeout(dialog_session.as_deref()).await;
+            }
+            if wedge
+                .as_ref()
+                .is_some_and(|w| w.replacement_target_id.is_some())
+            {
+                if let Err(e) = adopt_replacement_tab(state).await {
+                    result = Err(e);
+                    wedge = None;
+                }
             }
         }
     }
@@ -3876,6 +3885,27 @@ async fn install_active_network_controls(
         network::sanitize_existing_pages(&mgr.client, &mgr.pages_list(), filter).await;
     }
 
+    Ok(())
+}
+
+/// The wedged tab was replaced by a blank one: drop the old tab's refs and
+/// frame scope, and give the new tab the session setup and network controls
+/// (headers, routes, domain filter) that `tab new` installs.
+async fn adopt_replacement_tab(state: &mut DaemonState) -> Result<(), String> {
+    state.ref_map.begin_snapshot();
+    state.active_iframe_sessions.clear();
+    state.active_frame_id = None;
+    state.webmcp.clear_invocations();
+    let session_id = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .active_session_id()?
+        .to_string();
+    let has_proxy_creds = state.proxy_credentials.read().await.is_some();
+    apply_session_setup(state, &session_id).await?;
+    install_network_controls_or_close(state, has_proxy_creds).await?;
+    state.refresh_active_iframe_sessions().await;
     Ok(())
 }
 
