@@ -3222,8 +3222,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 .pending_dialog
                 .as_ref()
                 .and_then(|d| d.session_id.clone());
+            let may_replace = may_replace_wedged_tab(state);
             if let Some(mgr) = state.browser.as_mut() {
-                wedge = mgr.handle_command_timeout(dialog_session.as_deref()).await;
+                wedge = mgr
+                    .handle_command_timeout(dialog_session.as_deref(), may_replace)
+                    .await;
             }
             if let Some(old_session_id) = wedge
                 .as_ref()
@@ -3923,6 +3926,28 @@ async fn adopt_replacement_tab(
     state.drain_cdp_events_background().await?;
     state.refresh_active_iframe_sessions().await;
     Ok(())
+}
+
+/// Replacing a wedged tab opens one tab and closes another, so it runs only
+/// when policy would let the agent do both itself without a confirmation.
+fn may_replace_wedged_tab(state: &DaemonState) -> bool {
+    ["tab_new", "tab_close"].iter().all(|action| {
+        let confirmed = state.confirmed_policy_actions.contains(*action);
+        let policy_ok = state
+            .policy
+            .as_ref()
+            .is_none_or(|policy| match policy.check(action) {
+                PolicyResult::Allow => true,
+                PolicyResult::RequiresConfirmation => confirmed,
+                PolicyResult::Deny(_) => false,
+            });
+        let category_ok = confirmed
+            || !state
+                .confirm_actions
+                .as_ref()
+                .is_some_and(|ca| ca.requires_confirmation(action));
+        policy_ok && category_ok
+    })
 }
 
 /// Add to the response's warning instead of replacing one already set.
@@ -13797,6 +13822,35 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn wedged_tab_replacement_follows_tab_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_with = |body: &str| {
+            let path = dir.path().join("policy.json");
+            std::fs::write(&path, body).unwrap();
+            ActionPolicy::load(path.to_str().unwrap()).unwrap()
+        };
+        let mut state = DaemonState::new();
+        state.policy = None;
+        state.confirm_actions = None;
+        assert!(may_replace_wedged_tab(&state));
+
+        state.policy = Some(policy_with(r#"{"default":"allow","deny":["tab_close"]}"#));
+        assert!(!may_replace_wedged_tab(&state));
+
+        state.policy = Some(policy_with(r#"{"default":"allow","confirm":["tab_new"]}"#));
+        assert!(!may_replace_wedged_tab(&state));
+        state.confirmed_policy_actions.insert("tab_new".to_string());
+        assert!(may_replace_wedged_tab(&state));
+
+        state.policy = None;
+        state.confirmed_policy_actions.clear();
+        state.confirm_actions = Some(ConfirmActions {
+            categories: ["tab_close".to_string()].into_iter().collect(),
+        });
+        assert!(!may_replace_wedged_tab(&state));
+    }
+
+    #[test]
     fn wedge_report_delivered_only_clears_its_own_request() {
         let mut state = DaemonState::new();
         let report = || super::super::browser::WedgeReport {
@@ -13804,7 +13858,7 @@ mod tests {
             session_id: "S".to_string(),
             last_url: String::new(),
             replacement_target_id: None,
-            attached: false,
+            kept: false,
         };
         state.undelivered_wedge = Some(("b".to_string(), report()));
         state.wedge_report_delivered("a");

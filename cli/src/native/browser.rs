@@ -493,8 +493,9 @@ pub struct WedgeReport {
     /// Target of the blank tab that took its slot; `None` when the tab was
     /// left alone (attached browser, or the browser itself did not answer).
     pub replacement_target_id: Option<String>,
-    /// The tab is left alone for good (attached browser): the user acts.
-    pub attached: bool,
+    /// The tab is left alone for good (attached browser, or policy does not
+    /// allow the agent to replace tabs): the user acts.
+    pub kept: bool,
 }
 
 impl WedgeReport {
@@ -510,7 +511,7 @@ impl WedgeReport {
                  navigate again to continue",
                 PAGE_WEDGED_PREFIX, url
             ),
-            None if self.attached => format!(
+            None if self.kept => format!(
                 "{} the active tab{} stopped responding; close it or switch tabs to continue",
                 PAGE_WEDGED_PREFIX, url
             ),
@@ -1029,11 +1030,13 @@ impl BrowserManager {
     /// second strike on the same target, the wedged target is closed from the
     /// browser endpoint, which still answers, and a blank tab takes its slot
     /// (same tab id and label). Attached browsers keep their tab: it belongs
-    /// to the user, and they are the only ones `--pin-tab` applies to.
+    /// to the user, and they are the only ones `--pin-tab` applies to. So
+    /// does a session whose policy does not allow `may_replace`.
     /// Returns `None` when the tab is not wedged.
     pub async fn handle_command_timeout(
         &mut self,
         dialog_session: Option<&str>,
+        may_replace: bool,
     ) -> Option<WedgeReport> {
         if self.direct_page {
             return None;
@@ -1053,9 +1056,9 @@ impl BrowserManager {
             session_id: session_id.clone(),
             last_url,
             replacement_target_id: None,
-            attached: self.browser_process.is_none(),
+            kept: self.browser_process.is_none() || !may_replace,
         };
-        if report.attached {
+        if report.kept {
             return Some(report);
         }
         if self.wedge_suspect.as_deref() != Some(target_id.as_str()) {
