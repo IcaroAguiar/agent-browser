@@ -483,6 +483,8 @@ pub const PAGE_WEDGED_PREFIX: &str = "page_wedged:";
 /// What happened to a tab whose renderer stopped answering.
 pub struct WedgeReport {
     pub target_id: String,
+    /// CDP session of the wedged tab, for dropping its per-session state.
+    pub session_id: String,
     pub last_url: String,
     /// Target of the blank tab that took its slot; `None` when the tab was
     /// left alone (attached browser, or the browser itself did not answer).
@@ -1034,6 +1036,7 @@ impl BrowserManager {
         }
         let mut report = WedgeReport {
             target_id: target_id.clone(),
+            session_id: session_id.clone(),
             last_url,
             replacement_target_id: None,
         };

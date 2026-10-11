@@ -13158,3 +13158,57 @@ async fn e2e_wedged_page_replacement_keeps_session_network_controls() {
     assert_success(&resp);
     server.abort();
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_dialog_blocked_tab_is_not_treated_as_wedged() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>live</title>live" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let target_before = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_target_id()
+        .unwrap()
+        .to_string();
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "confirm('keep me')" }),
+        &mut state,
+    )
+    .await;
+    assert_ne!(
+        resp["code"], "page_wedged",
+        "a dialog is not a wedge: {}",
+        resp
+    );
+    assert_eq!(
+        state.browser.as_ref().unwrap().active_target_id().unwrap(),
+        target_before,
+        "the dialog-blocked tab must survive"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "dialog", "response": "dismiss" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(&json!({ "id": "5", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "live");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}

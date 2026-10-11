@@ -597,7 +597,9 @@ async fn handle_connection<S>(
                     break;
                 }
                 if response.get("code").and_then(Value::as_str) == Some("page_wedged") {
-                    state.lock().await.wedge_report_delivered();
+                    if let Some(id) = response.get("id").and_then(Value::as_str) {
+                        state.lock().await.wedge_report_delivered(id);
+                    }
                 }
 
                 if close_completed_response(&action, &response) {

@@ -681,9 +681,16 @@ fn default_idle_shutdown_is_blocked(
 }
 
 impl DaemonState {
-    /// The client received the `page_wedged` response, so it is not replayed.
-    pub fn wedge_report_delivered(&mut self) {
-        self.undelivered_wedge = None;
+    /// The client received the `page_wedged` response to request `id`, so it
+    /// is not replayed. A newer report from another request stays pending.
+    pub fn wedge_report_delivered(&mut self, id: &str) {
+        if self
+            .undelivered_wedge
+            .as_ref()
+            .is_some_and(|(wedged_id, _)| wedged_id == id)
+        {
+            self.undelivered_wedge = None;
+        }
     }
 
     pub fn new() -> Self {
@@ -2695,15 +2702,15 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // A retry of the request that wedged the tab must not run on its blank
     // replacement: `url` would report about:blank as a success.
-    let previous_wedge = match state.undelivered_wedge.take() {
-        Some((wedged_id, report)) if wedged_id == id => {
-            let mut resp = error_response(&id, &report.error_message());
-            resp["data"] = report.data();
-            state.undelivered_wedge = Some((wedged_id, report));
-            return resp;
-        }
-        other => other.map(|(_, report)| report),
-    };
+    if let Some((_, report)) = state
+        .undelivered_wedge
+        .as_ref()
+        .filter(|(wedged_id, _)| *wedged_id == id)
+    {
+        let mut resp = error_response(&id, &report.error_message());
+        resp["data"] = report.data();
+        return resp;
+    }
 
     if let Err(err) = validate_restore_config_from_command(cmd) {
         return error_response(&id, &err);
@@ -3200,6 +3207,32 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         state.last_command_finished = Some(std::time::Instant::now());
     }
 
+    let mut wedge = None;
+    if let Err(ref e) = result {
+        if e.contains("CDP command timed out") {
+            // A dialog opened by this command blocks the renderer like a
+            // wedge does; its event is only seen once events are drained.
+            let _ = state.drain_cdp_events_background().await;
+            let dialog_session = state
+                .pending_dialog
+                .as_ref()
+                .and_then(|d| d.session_id.clone());
+            if let Some(mgr) = state.browser.as_mut() {
+                wedge = mgr.handle_command_timeout(dialog_session.as_deref()).await;
+            }
+            if let Some(old_session_id) = wedge
+                .as_ref()
+                .filter(|w| w.replacement_target_id.is_some())
+                .map(|w| w.session_id.clone())
+            {
+                if let Err(e) = adopt_replacement_tab(state, &old_session_id).await {
+                    result = Err(e);
+                    wedge = None;
+                }
+            }
+        }
+    }
+
     // Persist the session-to-tab binding (write-on-change) so a fresh daemon
     // re-attaches to this session's tab instead of adopting the browser's
     // most recently active one.
@@ -3208,28 +3241,6 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     } else {
         None
     };
-
-    let mut wedge = None;
-    if let Err(ref e) = result {
-        if e.contains("CDP command timed out") {
-            let dialog_session = state
-                .pending_dialog
-                .as_ref()
-                .and_then(|d| d.session_id.clone());
-            if let Some(mgr) = state.browser.as_mut() {
-                wedge = mgr.handle_command_timeout(dialog_session.as_deref()).await;
-            }
-            if wedge
-                .as_ref()
-                .is_some_and(|w| w.replacement_target_id.is_some())
-            {
-                if let Err(e) = adopt_replacement_tab(state).await {
-                    result = Err(e);
-                    wedge = None;
-                }
-            }
-        }
-    }
 
     let mut resp = match (result, &wedge) {
         (_, Some(report)) => {
@@ -3243,30 +3254,26 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     attach_tab_gone_data(&mut resp, state);
     if let Some(report) = wedge {
         state.undelivered_wedge = Some((id.clone(), report));
-    } else if let Some(report) = previous_wedge {
+    } else if let Some((_, report)) = state.undelivered_wedge.take() {
         // The wedged command's response never reached the client.
-        if let Some(obj) = resp.as_object_mut() {
-            obj.insert("warning".to_string(), json!(report.error_message()));
-        }
+        append_warning(&mut resp, &report.error_message());
     }
 
     // A failed binding write is retried on the next command, but a pinned
     // session must know its isolation may not survive a daemon restart.
     if let Some(err) = persist_error {
-        if let Some(obj) = resp.as_object_mut() {
-            let hint = if state.pin_tab {
-                " --pin-tab isolation may not survive a daemon restart until the binding persists."
-            } else {
-                ""
-            };
-            obj.insert(
-                "warning".to_string(),
-                json!(format!(
-                    "Failed to persist the session tab binding: {}.{}",
-                    err, hint
-                )),
-            );
-        }
+        let hint = if state.pin_tab {
+            " --pin-tab isolation may not survive a daemon restart until the binding persists."
+        } else {
+            ""
+        };
+        append_warning(
+            &mut resp,
+            &format!(
+                "Failed to persist the session tab binding: {}.{}",
+                err, hint
+            ),
+        );
     }
     inject_lifecycle(
         &mut resp,
@@ -3294,15 +3301,13 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
         if let Some(ref dialog) = state.pending_dialog {
-            if let Some(obj) = resp.as_object_mut() {
-                obj.insert(
-                    "warning".to_string(),
-                    json!(format!(
-                        "A JavaScript {} dialog is blocking the page: \"{}\" — use `dialog accept` or `dialog dismiss` to resolve it",
-                        dialog.dialog_type, dialog.message
-                    )),
-                );
-            }
+            append_warning(
+                &mut resp,
+                &format!(
+                    "A JavaScript {} dialog is blocking the page: \"{}\" — use `dialog accept` or `dialog dismiss` to resolve it",
+                    dialog.dialog_type, dialog.message
+                ),
+            );
         }
     }
 
@@ -3891,7 +3896,12 @@ async fn install_active_network_controls(
 /// The wedged tab was replaced by a blank one: drop the old tab's refs and
 /// frame scope, and give the new tab the session setup and network controls
 /// (headers, routes, domain filter) that `tab new` installs.
-async fn adopt_replacement_tab(state: &mut DaemonState) -> Result<(), String> {
+async fn adopt_replacement_tab(
+    state: &mut DaemonState,
+    old_session_id: &str,
+) -> Result<(), String> {
+    state.webmcp.clear_page_scope(old_session_id);
+    state.webmcp.observations.remove(old_session_id);
     state.ref_map.begin_snapshot();
     state.active_iframe_sessions.clear();
     state.active_frame_id = None;
@@ -3905,8 +3915,18 @@ async fn adopt_replacement_tab(state: &mut DaemonState) -> Result<(), String> {
     let has_proxy_creds = state.proxy_credentials.read().await.is_some();
     apply_session_setup(state, &session_id).await?;
     install_network_controls_or_close(state, has_proxy_creds).await?;
+    state.drain_cdp_events_background().await?;
     state.refresh_active_iframe_sessions().await;
     Ok(())
+}
+
+/// Add to the response's warning instead of replacing one already set.
+fn append_warning(resp: &mut Value, warning: &str) {
+    let merged = match resp.get("warning").and_then(Value::as_str) {
+        Some(existing) => format!("{}\n{}", existing, warning),
+        None => warning.to_string(),
+    };
+    resp["warning"] = json!(merged);
 }
 
 async fn install_network_controls_or_close(
@@ -13771,6 +13791,22 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wedge_report_delivered_only_clears_its_own_request() {
+        let mut state = DaemonState::new();
+        let report = || super::super::browser::WedgeReport {
+            target_id: "T".to_string(),
+            session_id: "S".to_string(),
+            last_url: String::new(),
+            replacement_target_id: None,
+        };
+        state.undelivered_wedge = Some(("b".to_string(), report()));
+        state.wedge_report_delivered("a");
+        assert!(state.undelivered_wedge.is_some());
+        state.wedge_report_delivered("b");
+        assert!(state.undelivered_wedge.is_none());
+    }
+
     #[tokio::test]
     async fn test_auth_login_releases_remote_objects_after_failures() {
         use futures_util::{SinkExt, StreamExt};
