@@ -3208,6 +3208,11 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     let mut wedge = None;
+    if result.is_ok() {
+        if let Some(mgr) = state.browser.as_mut() {
+            mgr.clear_wedge_suspect();
+        }
+    }
     if let Err(ref e) = result {
         if e.contains("CDP command timed out") {
             // A dialog opened by this command blocks the renderer like a
@@ -13799,6 +13804,7 @@ mod tests {
             session_id: "S".to_string(),
             last_url: String::new(),
             replacement_target_id: None,
+            attached: false,
         };
         state.undelivered_wedge = Some(("b".to_string(), report()));
         state.wedge_report_delivered("a");

@@ -466,6 +466,10 @@ pub struct BrowserManager {
     /// (externally, or found missing at attach time): `(target_id, last_url)`.
     /// While set, commands that need the active page fail with `tab_gone`.
     bound_target_gone: Option<(String, String)>,
+    /// Target that timed out and failed the liveness probe once. A second
+    /// strike on the same target replaces it; a working command clears it,
+    /// so a long but finite script does not cost the tab.
+    wedge_suspect: Option<String>,
     /// Whether the daemon-spawned browser actually runs headless after
     /// launch rules such as extension-forced headed mode. Meaningless for
     /// attached browsers (browser_process is None).
@@ -489,6 +493,8 @@ pub struct WedgeReport {
     /// Target of the blank tab that took its slot; `None` when the tab was
     /// left alone (attached browser, or the browser itself did not answer).
     pub replacement_target_id: Option<String>,
+    /// The tab is left alone for good (attached browser): the user acts.
+    pub attached: bool,
 }
 
 impl WedgeReport {
@@ -504,8 +510,13 @@ impl WedgeReport {
                  navigate again to continue",
                 PAGE_WEDGED_PREFIX, url
             ),
-            None => format!(
+            None if self.attached => format!(
                 "{} the active tab{} stopped responding; close it or switch tabs to continue",
+                PAGE_WEDGED_PREFIX, url
+            ),
+            None => format!(
+                "{} the active tab{} stopped responding; if it still does not respond, the next \
+                 command that times out replaces it with a blank tab",
                 PAGE_WEDGED_PREFIX, url
             ),
         }
@@ -660,6 +671,7 @@ impl BrowserManager {
                 pin_tab: false,
                 bound_target_id: None,
                 bound_target_gone: None,
+                wedge_suspect: None,
                 headless,
             };
             if let Err(error) = manager.discover_and_attach_targets().await {
@@ -767,6 +779,7 @@ impl BrowserManager {
             pin_tab: false,
             bound_target_id: None,
             bound_target_gone: None,
+            wedge_suspect: None,
             headless: true,
         };
 
@@ -1012,7 +1025,8 @@ impl BrowserManager {
     /// holding it), the tab is wedged, for example by `while(true){}`: its
     /// renderer never yields, so every later command would time out too.
     ///
-    /// For a daemon-launched browser the wedged target is closed from the
+    /// For a daemon-launched browser the first strike only reports. On a
+    /// second strike on the same target, the wedged target is closed from the
     /// browser endpoint, which still answers, and a blank tab takes its slot
     /// (same tab id and label). Attached browsers keep their tab: it belongs
     /// to the user, and they are the only ones `--pin-tab` applies to.
@@ -1039,10 +1053,16 @@ impl BrowserManager {
             session_id: session_id.clone(),
             last_url,
             replacement_target_id: None,
+            attached: self.browser_process.is_none(),
         };
-        if self.browser_process.is_none() {
+        if report.attached {
             return Some(report);
         }
+        if self.wedge_suspect.as_deref() != Some(target_id.as_str()) {
+            self.wedge_suspect = Some(target_id);
+            return Some(report);
+        }
+        self.wedge_suspect = None;
         // Create first: the replacement must exist before the wedged tab
         // closes, or closing the last tab would close the browser.
         let Ok(replacement) = self.open_blank_target().await else {
@@ -1069,6 +1089,11 @@ impl BrowserManager {
         }
         report.replacement_target_id = Some(replacement.0);
         Some(report)
+    }
+
+    /// A command completed, so a suspected wedge was only a slow page.
+    pub fn clear_wedge_suspect(&mut self) {
+        self.wedge_suspect = None;
     }
 
     /// Create and attach a blank target, returning `(target_id, session_id)`.
@@ -2570,6 +2595,7 @@ async fn initialize_lightpanda_manager(
             pin_tab: false,
             bound_target_id: None,
             bound_target_gone: None,
+            wedge_suspect: None,
             headless: true,
         };
 
@@ -2679,6 +2705,7 @@ async fn initialize_obscura_manager(
             pin_tab: false,
             bound_target_id: None,
             bound_target_gone: None,
+            wedge_suspect: None,
             headless: true,
         };
 
@@ -3474,6 +3501,7 @@ mod tests {
             pin_tab: false,
             bound_target_id: None,
             bound_target_gone: None,
+            wedge_suspect: None,
             headless: true,
         }
     }
@@ -3534,6 +3562,7 @@ mod tests {
             pin_tab: false,
             bound_target_id: None,
             bound_target_gone: None,
+            wedge_suspect: None,
             headless: true,
         };
         manager.close().await.unwrap();

@@ -13053,10 +13053,19 @@ async fn e2e_wedged_page_is_replaced_and_session_recovers() {
     .await;
     assert_eq!(resp["success"], false, "wedging eval must fail: {}", resp);
     assert_eq!(resp["code"], "page_wedged", "got: {}", resp);
+    assert_eq!(resp["data"]["replaced"], false, "first strike only reports");
     assert!(
         started.elapsed() < std::time::Duration::from_secs(40),
         "wedge must surface within one CDP timeout plus probe, took {:?}",
         started.elapsed()
+    );
+
+    // Second strike on the same tab replaces it.
+    let resp = execute_command(&json!({ "id": "3b", "action": "url" }), &mut state).await;
+    assert_eq!(
+        resp["data"]["replaced"], true,
+        "second strike replaces: {}",
+        resp
     );
     assert_eq!(
         state.browser.as_ref().unwrap().tab_list().len(),
@@ -13065,11 +13074,7 @@ async fn e2e_wedged_page_is_replaced_and_session_recovers() {
 
     // The client's read timeout can expire before the replacement finishes.
     // A retry of the same request gets the report, not the blank tab's URL.
-    let resp = execute_command(
-        &json!({ "id": "3", "action": "evaluate", "script": "while(true){}" }),
-        &mut state,
-    )
-    .await;
+    let resp = execute_command(&json!({ "id": "3b", "action": "url" }), &mut state).await;
     assert_eq!(
         resp["code"], "page_wedged",
         "retry replays the report: {}",
@@ -13132,6 +13137,8 @@ async fn e2e_wedged_page_replacement_keeps_session_network_controls() {
     )
     .await;
     assert_eq!(resp["code"], "page_wedged", "got: {}", resp);
+    let resp = execute_command(&json!({ "id": "3b", "action": "url" }), &mut state).await;
+    assert_eq!(resp["data"]["replaced"], true, "got: {}", resp);
 
     let resp = execute_command(
         &json!({ "id": "4", "action": "navigate", "url": format!("{}/second", base_url) }),
@@ -13208,6 +13215,55 @@ async fn e2e_dialog_blocked_tab_is_not_treated_as_wedged() {
     let resp = execute_command(&json!({ "id": "5", "action": "title" }), &mut state).await;
     assert_success(&resp);
     assert_eq!(get_data(&resp)["title"], "live");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_slow_finite_script_keeps_its_tab() {
+    let mut state = DaemonState::new();
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>slow</title>slow" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let target_before = state
+        .browser
+        .as_ref()
+        .unwrap()
+        .active_target_id()
+        .unwrap()
+        .to_string();
+
+    // Busy for longer than the CDP timeout plus the probe, then yields.
+    let resp = execute_command(
+        &json!({
+            "id": "3", "action": "evaluate",
+            "script": "const t = Date.now(); while (Date.now() - t < 36000) {}",
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["code"], "page_wedged", "got: {}", resp);
+    assert_eq!(resp["data"]["replaced"], false);
+
+    let resp = execute_command(&json!({ "id": "4", "action": "title" }), &mut state).await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["title"], "slow");
+    assert_eq!(
+        state.browser.as_ref().unwrap().active_target_id().unwrap(),
+        target_before,
+        "a page that recovers on its own keeps its tab"
+    );
 
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     assert_success(&resp);
