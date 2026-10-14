@@ -733,9 +733,6 @@ impl BrowserManager {
                 .await;
             return Err(error);
         }
-        if !direct_page {
-            manager.enable_download_events().await;
-        }
         Ok(manager)
     }
 

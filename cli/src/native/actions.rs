@@ -7748,6 +7748,18 @@ async fn wait_for_downloaded_file(path: &std::path::Path) -> bool {
 }
 
 async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let result = download_to_path(cmd, state).await;
+    // `download` points the browser at the destination's directory; restore the
+    // configured one so later downloads land where `wait --download` expects.
+    if let Some(mgr) = state.browser.as_ref() {
+        if !mgr.is_cdp_connection() {
+            mgr.enable_download_events().await;
+        }
+    }
+    result
+}
+
+async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -11072,7 +11084,12 @@ async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<
         );
     };
     let saved = PathBuf::from(saved);
-    if !wait_for_downloaded_file(&saved).await {
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let launched_locally = !mgr.is_cdp_connection();
+    let download_dir = mgr.download_path.clone();
+    // A CDP endpoint reports a path on its own filesystem, which may not be
+    // this machine's.
+    if launched_locally && !wait_for_downloaded_file(&saved).await {
         return Err(format!(
             "Download completed but no file is at {}",
             saved.display()
@@ -11082,12 +11099,8 @@ async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<
     let Some(path_str) = path_arg else {
         return Ok(json!({ "path": saved.to_string_lossy() }));
     };
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    if !may_move_download(
-        &saved,
-        !mgr.is_cdp_connection(),
-        mgr.download_path.as_deref(),
-    ) {
+    if !may_move_download(&saved, launched_locally, download_dir.as_deref()) {
+        state.downloads.release(&record.guid);
         return Err(format!(
             "Refusing to move {}: only downloads from a browser agent-browser launched, inside its download directory, can be moved",
             saved.display()
@@ -13882,6 +13895,105 @@ mod tests {
         super::execute_command(
             &serde_json::json!({ "id": "9", "action": "close" }),
             &mut state,
+        )
+        .await;
+    }
+
+    /// `download` points the browser at another directory; later downloads must
+    /// go back to the configured one so `wait --download` can still move them.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_after_download_command_uses_configured_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        start_finished_download(&mut state, &dir.path().join("downloads")).await;
+        let claimed = super::execute_command(
+            &serde_json::json!({ "id": "4", "action": "waitfordownload", "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(claimed["success"], true, "{claimed}");
+
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "download", "selector": "#dl",
+                "path": dir.path().join("other").join("first.bin").to_string_lossy() }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "6", "action": "evaluate",
+                "script": "document.getElementById('dl').click()" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+
+        let dest = dir.path().join("out").join("second.bin");
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "7", "action": "waitfordownload",
+                "path": dest.to_string_lossy(), "timeout": 5000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "report");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    /// Connecting over CDP must not reset the attached browser's download
+    /// directory, and the wait must not require the file on the local disk.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_cdp_connect_keeps_the_browser_download_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let download_dir = dir.path().join("downloads");
+        std::fs::create_dir_all(&download_dir).unwrap();
+        let mut owner = super::DaemonState::new();
+        for cmd in [
+            serde_json::json!({ "id": "1", "action": "launch", "headless": true,
+                "downloadPath": download_dir.to_string_lossy() }),
+            serde_json::json!({ "id": "2", "action": "navigate", "url":
+                "data:text/html,<a id=dl download=report.bin href='data:application/octet-stream,report'>dl</a>" }),
+        ] {
+            let resp = super::execute_command(&cmd, &mut owner).await;
+            assert_eq!(resp["success"], true, "{resp}");
+        }
+        let cdp_url = owner.browser.as_ref().unwrap().get_cdp_url().to_string();
+
+        let mut attached = super::DaemonState::new();
+        for cmd in [
+            serde_json::json!({ "id": "3", "action": "launch", "cdpUrl": cdp_url }),
+            serde_json::json!({ "id": "4", "action": "evaluate",
+                "script": "document.getElementById('dl').click()" }),
+        ] {
+            let resp = super::execute_command(&cmd, &mut attached).await;
+            assert_eq!(resp["success"], true, "{resp}");
+        }
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "waitfordownload", "timeout": 5000 }),
+            &mut attached,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        let saved = download_dir.join("report.bin");
+        for _ in 0..50 {
+            if saved.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            saved.exists(),
+            "download should stay in the configured directory"
+        );
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut owner,
         )
         .await;
     }
