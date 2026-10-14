@@ -844,7 +844,11 @@ impl DaemonState {
         };
 
         let client = browser.client.clone();
-        let mut rx = browser.client.subscribe();
+        let mut rx = browser.client.subscribe_methods(&[
+            "Fetch.authRequired",
+            "Target.attachedToTarget",
+            "Fetch.requestPaused",
+        ]);
         let domain_filter = self.domain_filter.clone();
         let routes = self.routes.clone();
         let origin_headers = self.origin_headers.clone();
@@ -854,7 +858,7 @@ impl DaemonState {
         self.fetch_handler_task = Some(tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(event) if event.method == "Fetch.authRequired" => {
+                    Some(event) if event.method == "Fetch.authRequired" => {
                         let request_id = event
                             .params
                             .get("requestId")
@@ -893,7 +897,7 @@ impl DaemonState {
                                 .await;
                         }
                     }
-                    Ok(event) if event.method == "Target.attachedToTarget" => {
+                    Some(event) if event.method == "Target.attachedToTarget" => {
                         let Some(sid) = event
                             .params
                             .get("sessionId")
@@ -970,7 +974,7 @@ impl DaemonState {
                             );
                         }
                     }
-                    Ok(event) if event.method == "Fetch.requestPaused" => {
+                    Some(event) if event.method == "Fetch.requestPaused" => {
                         let request_id = event
                             .params
                             .get("requestId")
@@ -1012,9 +1016,8 @@ impl DaemonState {
 
                         resolve_fetch_paused(&client, df.as_ref(), &rt, &oh, &paused).await;
                     }
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
+                    Some(_) => continue,
+                    None => break,
                 }
             }
         }));
