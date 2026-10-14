@@ -1,8 +1,20 @@
 # agent-browser
 
-## 0.39.0
+## 0.39.1
 
 <!-- release:start -->
+### Bug Fixes
+
+- Fixed **duplicate command execution after a lost daemon response** so mutating and launch commands are no longer retried after any request bytes have been sent. CLI JSON and MCP responses report `outcome_unknown` so callers can inspect the result before retrying; read-only commands and failures before sending retain their retries (#2085)
+
+### Contributors
+
+- @Railly
+- @rotemb-wond
+<!-- release:end -->
+
+## 0.39.0
+
 ### New Features
 
 - Added an experimental **Obscura engine** (`--engine obscura`), launched and cleaned up locally like Chrome with bounded startup and CLI/MCP support. Obscura still has accessibility and rendering gaps, so review the engine page before choosing it (#1876)
@@ -27,7 +39,6 @@
 - @godtail
 - @jadenfix
 - @niieani
-<!-- release:end -->
 
 ## 0.38.2
 
