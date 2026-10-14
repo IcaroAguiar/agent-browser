@@ -3210,7 +3210,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut wedge = None;
     if result.is_ok() {
         if let Some(mgr) = state.browser.as_mut() {
-            mgr.clear_wedge_suspect();
+            mgr.clear_wedge_suspect_if_responsive().await;
         }
     }
     if let Err(ref e) = result {

@@ -1044,11 +1044,15 @@ impl BrowserManager {
         let page = self.pages.get(self.active_page_index)?;
         let (session_id, target_id) = (page.session_id.clone(), page.target_id.clone());
         let last_url = tab_binding::sanitize_url(&page.url);
-        if dialog_session == Some(session_id.as_str())
-            || self
-                .renderer_responds(&session_id, RENDERER_PROBE_TIMEOUT_MS)
-                .await
+        if dialog_session == Some(session_id.as_str()) {
+            return None;
+        }
+        if self
+            .renderer_responds(&session_id, RENDERER_PROBE_TIMEOUT_MS)
+            .await
         {
+            // A slow command, not a wedge: an earlier strike no longer applies.
+            self.wedge_suspect = None;
             return None;
         }
         let mut report = WedgeReport {
@@ -1094,9 +1098,22 @@ impl BrowserManager {
         Some(report)
     }
 
-    /// A command completed, so a suspected wedge was only a slow page.
-    pub fn clear_wedge_suspect(&mut self) {
-        self.wedge_suspect = None;
+    /// A command completed. Commands such as `tab list` never reach the
+    /// renderer, so only a renderer that answers clears a suspected wedge.
+    pub async fn clear_wedge_suspect_if_responsive(&mut self) {
+        let Some(suspect) = self.wedge_suspect.as_deref() else {
+            return;
+        };
+        let Some(page) = self.pages.get(self.active_page_index) else {
+            return;
+        };
+        if page.target_id != suspect
+            || self
+                .renderer_responds(&page.session_id, RENDERER_PROBE_TIMEOUT_MS)
+                .await
+        {
+            self.wedge_suspect = None;
+        }
     }
 
     /// Create and attach a blank target, returning `(target_id, session_id)`.

@@ -13109,6 +13109,79 @@ async fn e2e_wedged_page_is_replaced_and_session_recovers() {
     assert_success(&resp);
 }
 
+async fn launch_wedge_session(state: &mut DaemonState) {
+    for cmd in [
+        json!({ "id": "1", "action": "launch", "headless": true }),
+        json!({ "id": "2", "action": "navigate", "url": "data:text/html,<title>spin</title>spin" }),
+    ] {
+        assert_success(&execute_command(&cmd, state).await);
+    }
+}
+
+/// Diagnostics do not touch the renderer, so they must not clear a strike.
+#[tokio::test]
+#[ignore]
+async fn e2e_diagnostics_between_wedge_strikes_keep_the_strike() {
+    let mut state = DaemonState::new();
+    launch_wedge_session(&mut state).await;
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate", "script": "while(true){}" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["data"]["replaced"], false, "first strike: {}", resp);
+    for (id, action) in [("4", "tab_list"), ("5", "session_info")] {
+        assert_success(&execute_command(&json!({ "id": id, "action": action }), &mut state).await);
+    }
+    let resp = execute_command(&json!({ "id": "6", "action": "url" }), &mut state).await;
+    assert_eq!(
+        resp["data"]["replaced"], true,
+        "second strike replaces: {}",
+        resp
+    );
+    execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
+/// A timeout whose probe answers is a slow command, not a wedge, so it
+/// clears the earlier strike.
+#[tokio::test]
+#[ignore]
+async fn e2e_responsive_probe_clears_an_earlier_strike() {
+    let mut state = DaemonState::new();
+    launch_wedge_session(&mut state).await;
+    // Blocks past the CDP timeout and the probe, then yields.
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "evaluate",
+                 "script": "const t = Date.now() + 36000; while (Date.now() < t) {}" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["data"]["replaced"], false, "first strike: {}", resp);
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    // Times out while the renderer answers.
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "evaluate", "script": "new Promise(() => {})" }),
+        &mut state,
+    )
+    .await;
+    assert_ne!(
+        resp["code"], "page_wedged",
+        "a responsive page is not wedged: {}",
+        resp
+    );
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "evaluate", "script": "while(true){}" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["data"]["replaced"], false,
+        "a new hang starts over: {}",
+        resp
+    );
+    execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+}
+
 #[tokio::test]
 #[ignore]
 async fn e2e_wedged_page_replacement_keeps_session_network_controls() {
