@@ -305,7 +305,24 @@ async fn discover_cdp_ws(
 }
 
 async fn reqwest_get_string(url: &str, headers: &[(String, String)]) -> Result<String, String> {
-    let mut request = reqwest::Client::new().get(url);
+    let mut builder = reqwest::Client::builder();
+    if !headers.is_empty() {
+        // Custom auth headers would follow a redirect to any host; keep them on
+        // the origin the user supplied.
+        builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let same_origin = attempt
+                .previous()
+                .first()
+                .is_some_and(|first| first.origin() == attempt.url().origin());
+            if same_origin {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }));
+    }
+    let client = builder.build().map_err(|e| e.to_string())?;
+    let mut request = client.get(url);
     for (key, value) in headers {
         request = request.header(key, value);
     }
@@ -358,6 +375,44 @@ mod tests {
         let request = server.await.unwrap();
         assert!(request.starts_with("get /json/version"), "{request}");
         assert!(request.contains("authorization: bearer t"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_forward_cdp_headers_across_origins() {
+        let other = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_port = other.local_addr().unwrap().port();
+        let other_server = tokio::spawn(async move {
+            let Ok(Ok((mut s, _))) =
+                tokio::time::timeout(Duration::from_secs(2), other.accept()).await
+            else {
+                return String::new();
+            };
+            let mut buf = [0u8; 2048];
+            let n = s.read(&mut buf).await.unwrap_or(0);
+            let _ = s.write_all(HTTP_404.as_bytes()).await;
+            String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase()
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://localhost:{other_port}/json/version\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf).await;
+                let _ = s.write_all(redirect.as_bytes()).await;
+            }
+        });
+
+        let headers = vec![("X-API-Key".to_string(), "secret".to_string())];
+        let _ = discover_cdp_url_with_headers("127.0.0.1", port, None, &headers, false).await;
+        let request = other_server.await.unwrap();
+        assert!(!request.contains("x-api-key"), "{request}");
     }
 
     #[tokio::test]

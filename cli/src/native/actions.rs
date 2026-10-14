@@ -4854,6 +4854,18 @@ fn cdp_headers_from_command(cmd: &Value) -> Option<Vec<(String, String)>> {
     }
 }
 
+/// CDP connect headers carry credentials, so a changed token must not reuse
+/// the existing connection.
+fn with_cdp_headers(target: Option<String>, cmd: &Value) -> Option<String> {
+    match (target, cdp_headers_from_command(cmd)) {
+        (Some(target), Some(mut headers)) => {
+            headers.sort();
+            Some(format!("{target}\n{headers:?}"))
+        }
+        (target, _) => target,
+    }
+}
+
 async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     handle_launch_with_deadline(cmd, state, BROWSER_USE_SETUP_DEADLINE).await
 }
@@ -5080,6 +5092,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     let (connection_kind, connection_target) =
         launch_connection_identity(cdp_url, cdp_port, auto_connect, provider_name);
+    let connection_target = with_cdp_headers(connection_target, cmd);
     let new_hash = launch_hash(
         &launch_options,
         &allowed_domains,
@@ -16615,6 +16628,32 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
         let mut cleared_options = LaunchOptions::default();
         apply_effective_ca_cert(&mut cleared_options, &cleared);
         assert!(validate_ca_cert_launch_mode(&cleared_options, Some("chrome"), true).is_ok());
+    }
+
+    #[test]
+    fn test_launch_hash_changes_with_cdp_headers() {
+        let opts = LaunchOptions::default();
+        let hash_for = |cmd: Value| {
+            let target = with_cdp_headers(Some("wss://example.com/cdp".to_string()), &cmd);
+            launch_hash(
+                &opts,
+                &[],
+                &[],
+                &[],
+                &[],
+                Some("chrome"),
+                "cdp-url",
+                target.as_deref(),
+            )
+        };
+        let a = hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer a" } }));
+        let b = hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer b" } }));
+        assert_ne!(a, b);
+        assert_eq!(
+            a,
+            hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer a" } }))
+        );
+        assert_ne!(a, hash_for(json!({})));
     }
 
     #[test]
