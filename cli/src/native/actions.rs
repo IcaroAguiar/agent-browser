@@ -921,6 +921,11 @@ impl DaemonState {
                         let target_needs_controls = target_info
                             .as_ref()
                             .is_some_and(target_supports_network_controls);
+                        let waiting_for_debugger = event
+                            .params
+                            .get("waitingForDebugger")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
@@ -947,6 +952,7 @@ impl DaemonState {
                                             &sid,
                                             df.as_ref(),
                                             has_proxy_creds,
+                                            waiting_for_debugger,
                                         )
                                         .await
                                     }
@@ -1275,6 +1281,7 @@ impl DaemonState {
                             iframe_sid,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -1310,6 +1317,7 @@ impl DaemonState {
                             page_sid,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -1447,6 +1455,7 @@ impl DaemonState {
                             &attach.session_id,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -3743,6 +3752,7 @@ async fn install_network_controls_for_session(
     session_id: &str,
     filter: Option<&DomainFilter>,
     handle_auth_requests: bool,
+    paused_before_document: bool,
 ) -> Result<(), String> {
     if let Some(filter) = filter {
         network::install_domain_filter(
@@ -3750,6 +3760,7 @@ async fn install_network_controls_for_session(
             session_id,
             &filter.allowed_domains,
             handle_auth_requests,
+            paused_before_document,
         )
         .await?;
     } else if handle_auth_requests {
@@ -3821,6 +3832,7 @@ async fn install_active_network_controls(
             &session_id,
             filter.as_ref(),
             handle_auth_requests,
+            false,
         )
         .await?;
         mgr.resume_if_waiting_pub(&session_id).await?;
