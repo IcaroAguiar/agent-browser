@@ -4172,6 +4172,104 @@ async fn e2e_domain_filter() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_domain_filter_reports_blocked_redirect() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let requests_for_server = requests.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..20 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let requests = requests_for_server.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let request_line = request.lines().next().unwrap_or("").to_string();
+                let response = if request_line.contains(" /redirect ") {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/denied\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        port,
+                    )
+                } else {
+                    let body = "<!doctype html><title>Blocked</title>allowed";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    )
+                };
+                if let Ok(mut logged) = requests.lock() {
+                    logged.push(request_line);
+                }
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+
+    let mut state = DaemonState::new();
+    {
+        let mut df = state.domain_filter.write().await;
+        *df = Some(super::network::DomainFilter::new("localhost"));
+    }
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": format!("http://localhost:{}/redirect", port),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(
+        resp["success"], false,
+        "Blocked redirect reported success: {}",
+        resp
+    );
+    let error = resp["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains(&format!("http://127.0.0.1:{}/denied", port))
+            && error.contains("domain filter"),
+        "Blocked redirect should name the blocked URL, got: {}",
+        error
+    );
+    let logged = requests.lock().unwrap().clone();
+    assert!(
+        !logged.iter().any(|line| line.contains(" /denied ")),
+        "Blocked redirect target was requested: {:?}",
+        logged
+    );
+
+    // An allowed page whose own title is "Blocked" is still a success.
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "navigate",
+            "url": format!("http://localhost:{}/", port),
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+    server.abort();
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_domain_filter_blocks_page_created_popup_before_first_request() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
