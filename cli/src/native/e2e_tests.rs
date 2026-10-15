@@ -5986,9 +5986,6 @@ async fn e2e_snapshot_cursor_interactive() {
     assert_success(&resp);
 }
 
-/// Verifies that `screenshot --annotate` completes in bounded time even with
-/// many interactive elements. Guards against the sequential CDP round-trip
-/// regression that caused hangs over high-latency WSS (Issue #841).
 /// A full-page screenshot with a real device scale factor of 2 (not the
 /// emulated one, which already reports CSS pixels) must be the page size
 /// times two, with the page filling it, not twice that with the page in the
@@ -6036,6 +6033,9 @@ async fn e2e_screenshot_full_page_high_dpi() {
     assert_success(&resp);
 }
 
+/// Verifies that `screenshot --annotate` completes in bounded time even with
+/// many interactive elements. Guards against the sequential CDP round-trip
+/// regression that caused hangs over high-latency WSS (Issue #841).
 #[tokio::test]
 #[ignore]
 async fn e2e_screenshot_annotate_many_elements() {
