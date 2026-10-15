@@ -5986,9 +5986,6 @@ async fn e2e_snapshot_cursor_interactive() {
     assert_success(&resp);
 }
 
-/// Verifies that `screenshot --annotate` completes in bounded time even with
-/// many interactive elements. Guards against the sequential CDP round-trip
-/// regression that caused hangs over high-latency WSS (Issue #841).
 /// Share of pixels in a screenshot that are pure red (#c00), for checking
 /// that an element clip actually contains the element.
 fn red_fraction(path: &str) -> (u32, u32, f64) {
@@ -6096,6 +6093,9 @@ async fn e2e_screenshot_selector_beyond_viewport() {
     assert_success(&resp);
 }
 
+/// Verifies that `screenshot --annotate` completes in bounded time even with
+/// many interactive elements. Guards against the sequential CDP round-trip
+/// regression that caused hangs over high-latency WSS (Issue #841).
 #[tokio::test]
 #[ignore]
 async fn e2e_screenshot_annotate_many_elements() {
