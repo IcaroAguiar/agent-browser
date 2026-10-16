@@ -211,7 +211,7 @@ fn autosave_interval_ms_from_env() -> u64 {
 #[cfg(unix)]
 async fn run_socket_server(
     socket_path: &PathBuf,
-    session: &str,
+    _session: &str,
     stream_client: Option<Arc<RwLock<Option<Arc<CdpClient>>>>>,
     stream_server: Option<Arc<StreamServer>>,
     idle_activity: Arc<IdleActivity>,
@@ -225,12 +225,6 @@ async fn run_socket_server(
     let listener =
         UnixListener::bind(socket_path).map_err(|e| format!("Failed to bind socket: {}", e))?;
 
-    let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        let dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
-        Some(SessionFile::Stream.path_in(dir, session))
-    } else {
-        None
-    };
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
             stream_client,
@@ -257,10 +251,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
-                        let sf = stream_file.clone();
                         let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, state, idle_activity, cn).await;
                         });
                     }
                     Err(e) => {
@@ -374,11 +367,6 @@ async fn run_socket_server(
     let port_path = SessionFile::Port.path_in(socket_dir, session);
     let _ = fs::write(&port_path, actual_port.to_string());
 
-    let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        Some(SessionFile::Stream.path_in(socket_dir, session))
-    } else {
-        None
-    };
     let state: std::sync::Arc<tokio::sync::Mutex<DaemonState>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(DaemonState::new_with_stream(
             stream_client,
@@ -405,10 +393,9 @@ async fn run_socket_server(
                     Ok((stream, _)) => {
                         let state = state.clone();
                         let idle_activity = idle_activity.clone();
-                        let sf = stream_file.clone();
                         let cn = close_notify.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, state, idle_activity, sf, cn).await;
+                            handle_connection(stream, state, idle_activity, cn).await;
                         });
                     }
                     Err(e) => {
@@ -457,7 +444,6 @@ async fn run_socket_server(
                 }
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
-                let _ = fs::remove_file(&port_path);
                 break;
             }
             _ = idle_activity.notified(), if idle_timeout_ms.is_some() => {
@@ -466,7 +452,6 @@ async fn run_socket_server(
                 continue;
             }
             _ = close_notify.notified() => {
-                let _ = fs::remove_file(&port_path);
                 break;
             }
             _ = shutdown_signal() => {
@@ -478,7 +463,6 @@ async fn run_socket_server(
                 };
                 let _ = auto_save_restore_state(&mut s).await;
                 let _ = close_all_browser_backends(&mut s).await;
-                let _ = fs::remove_file(&port_path);
                 break;
             }
         }
@@ -528,7 +512,6 @@ async fn handle_connection<S>(
     stream: S,
     state: std::sync::Arc<tokio::sync::Mutex<DaemonState>>,
     idle_activity: Arc<IdleActivity>,
-    stream_file_cleanup: Option<PathBuf>,
     close_notify: Arc<Notify>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -590,9 +573,6 @@ async fn handle_connection<S>(
                 }
 
                 if close_completed_response(&action, &response) {
-                    if let Some(ref path) = stream_file_cleanup {
-                        let _ = fs::remove_file(path);
-                    }
                     // Signal the daemon loop to exit gracefully instead of
                     // calling process::exit(), which skips destructors and
                     // can leave Chrome processes orphaned (issue #1113).

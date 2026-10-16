@@ -134,14 +134,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_all_files(dir.path(), "s");
         remove_daemon_files(dir.path(), "s");
-        for file in SessionFile::ALL {
-            assert_eq!(
-                file.path_in(dir.path(), "s").exists(),
-                !file.is_daemon_file(),
-                "{}",
-                file.extension()
-            );
-        }
+        let mut left: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["s.log", "s.target"]);
+        assert_eq!(
+            fs::read_to_string(SessionFile::Target.path_in(dir.path(), "s")).unwrap(),
+            "x"
+        );
     }
 
     #[test]
