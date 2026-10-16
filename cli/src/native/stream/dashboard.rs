@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::connection::get_socket_dir;
+use crate::session_files::SessionFile;
 
 use super::chat::{chat_status_json, handle_chat_request, handle_models_request};
 use super::discovery::discover_sessions;
@@ -949,7 +950,7 @@ async fn kill_session(body: &str) -> Result<String, String> {
     }
 
     let dir = get_socket_dir();
-    let pid_path = dir.join(format!("{}.pid", session));
+    let pid_path = SessionFile::Pid.path_in(&dir, session);
 
     let pid_str = std::fs::read_to_string(&pid_path)
         .map_err(|_| format!("No PID file for session '{}'", session))?;

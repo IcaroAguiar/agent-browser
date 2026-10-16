@@ -2,7 +2,7 @@ use serde_json::Value;
 use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +19,7 @@ use super::cdp::client::CdpClient;
 use super::state;
 use super::stream::{IdleActivity, StreamServer};
 use crate::connection::INTERNAL_DAEMON_SHUTDOWN_ACTION;
+use crate::session_files::{owns_session, remove_daemon_files, SessionFile};
 
 pub async fn run_daemon(session: &str) {
     let socket_dir = get_daemon_socket_dir();
@@ -31,7 +32,7 @@ pub async fn run_daemon(session: &str) {
     // parent which drops the read end after startup).
     #[cfg(unix)]
     if env::var("AGENT_BROWSER_DEBUG").is_ok() {
-        let log_path = socket_dir.join(format!("{}.log", session));
+        let log_path = SessionFile::Log.path_in(&socket_dir, session);
         if let Ok(file) = fs::File::create(&log_path) {
             use std::os::unix::io::IntoRawFd;
             let fd = file.into_raw_fd();
@@ -63,15 +64,15 @@ pub async fn run_daemon(session: &str) {
         }
     }
 
-    let pid_path = socket_dir.join(format!("{}.pid", session));
+    let pid_path = SessionFile::Pid.path_in(&socket_dir, session);
     let _ = fs::write(&pid_path, process::id().to_string());
 
-    let version_path = socket_dir.join(format!("{}.version", session));
+    let version_path = SessionFile::Version.path_in(&socket_dir, session);
     let _ = fs::write(&version_path, env!("CARGO_PKG_VERSION"));
 
     // On Unix the daemon listens on a Unix domain socket; on Windows it uses
     // TCP, so there is no .sock file — only a .port file written by the server.
-    let socket_path = socket_dir.join(format!("{}.sock", session));
+    let socket_path = SessionFile::Socket.path_in(&socket_dir, session);
 
     #[cfg(unix)]
     if socket_path.exists() {
@@ -80,14 +81,14 @@ pub async fn run_daemon(session: &str) {
 
     #[cfg(windows)]
     {
-        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
+        let _ = fs::remove_file(SessionFile::Port.path_in(&socket_dir, session));
     }
 
-    let stream_path = socket_dir.join(format!("{}.stream", session));
+    let stream_path = SessionFile::Stream.path_in(&socket_dir, session);
     let _ = fs::remove_file(&stream_path);
-    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
+    let _ = fs::remove_file(SessionFile::Engine.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Provider.path_in(&socket_dir, session));
+    let _ = fs::remove_file(SessionFile::Extensions.path_in(&socket_dir, session));
 
     if let Ok(days_str) = env::var("AGENT_BROWSER_STATE_EXPIRE_DAYS") {
         if let Ok(days) = days_str.parse::<u64>() {
@@ -143,38 +144,15 @@ pub async fn run_daemon(session: &str) {
     )
     .await;
 
-    #[cfg(unix)]
-    {
-        let _ = fs::remove_file(&socket_path);
+    // Leave the files alone if a replacement daemon for this session has
+    // already taken over.
+    if owns_session(&socket_dir, session, process::id()) {
+        remove_daemon_files(&socket_dir, session);
     }
-    #[cfg(windows)]
-    {
-        let _ = fs::remove_file(socket_dir.join(format!("{}.port", session)));
-    }
-    // Must run before the .pid file is removed: ownership is checked against it.
-    remove_owned_config_file(&socket_dir, session, process::id());
-    let _ = fs::remove_file(&pid_path);
-    let _ = fs::remove_file(&version_path);
-    let _ = fs::remove_file(&stream_path);
-    let _ = fs::remove_file(socket_dir.join(format!("{}.engine", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.provider", session)));
-    let _ = fs::remove_file(socket_dir.join(format!("{}.extensions", session)));
 
     if let Err(e) = result {
         let _ = writeln!(std::io::stderr(), "Daemon error: {}", e);
         process::exit(1);
-    }
-}
-
-/// Remove `<session>.config` on daemon exit, but only while `<session>.pid`
-/// still holds our pid, so a replacement daemon for the same session keeps
-/// its config.
-fn remove_owned_config_file(socket_dir: &Path, session: &str, pid: u32) {
-    let owner = fs::read_to_string(socket_dir.join(format!("{}.pid", session)))
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok());
-    if owner == Some(pid) {
-        let _ = fs::remove_file(socket_dir.join(format!("{}.config", session)));
     }
 }
 
@@ -249,7 +227,7 @@ async fn run_socket_server(
 
     let stream_file: Option<PathBuf> = if stream_server.is_some() {
         let dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
-        Some(dir.join(format!("{}.stream", session)))
+        Some(SessionFile::Stream.path_in(dir, session))
     } else {
         None
     };
@@ -393,11 +371,11 @@ async fn run_socket_server(
         .port();
 
     let socket_dir = socket_path.parent().unwrap_or(std::path::Path::new("."));
-    let port_path = socket_dir.join(format!("{}.port", session));
+    let port_path = SessionFile::Port.path_in(socket_dir, session);
     let _ = fs::write(&port_path, actual_port.to_string());
 
     let stream_file: Option<PathBuf> = if stream_server.is_some() {
-        Some(socket_dir.join(format!("{}.stream", session)))
+        Some(SessionFile::Stream.path_in(socket_dir, session))
     } else {
         None
     };
@@ -722,32 +700,6 @@ fn get_port_for_session(session: &str) -> u16 {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-
-    #[test]
-    fn test_remove_owned_config_file_removes_config_while_owned() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("s.pid"), "4242").unwrap();
-        fs::write(dir.path().join("s.config"), "fingerprint").unwrap();
-        remove_owned_config_file(dir.path(), "s", 4242);
-        assert!(!dir.path().join("s.config").exists());
-    }
-
-    #[test]
-    fn test_remove_owned_config_file_keeps_config_of_newer_daemon() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("s.pid"), "5151\n").unwrap();
-        fs::write(dir.path().join("s.config"), "fingerprint").unwrap();
-        remove_owned_config_file(dir.path(), "s", 4242);
-        assert!(dir.path().join("s.config").exists());
-    }
-
-    #[test]
-    fn test_remove_owned_config_file_keeps_config_without_pid_file() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("s.config"), "fingerprint").unwrap();
-        remove_owned_config_file(dir.path(), "s", 4242);
-        assert!(dir.path().join("s.config").exists());
-    }
 
     #[test]
     fn test_resolve_idle_timeout_unset_applies_default() {
