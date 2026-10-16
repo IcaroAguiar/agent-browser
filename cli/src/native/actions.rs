@@ -16505,6 +16505,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
+    fn test_launch_options_from_env_args_keep_commas_inside_values() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ARGS"]);
+        guard.set(
+            "AGENT_BROWSER_ARGS",
+            "--disable-features=HttpsUpgrades,Translate,--no-first-run\n--window-size=1280,720",
+        );
+        let opts = launch_options_from_env();
+        assert_eq!(
+            opts.args,
+            vec![
+                "--disable-features=HttpsUpgrades,Translate",
+                "--no-first-run",
+                "--window-size=1280,720",
+            ]
+        );
+    }
+
+    #[test]
     fn test_launch_options_from_env_hide_scrollbars_false() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
         guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
