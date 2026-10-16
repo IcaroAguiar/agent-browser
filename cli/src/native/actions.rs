@@ -4502,12 +4502,7 @@ fn launch_options_from_env() -> LaunchOptions {
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false),
         args: env::var("AGENT_BROWSER_ARGS")
-            .map(|v| {
-                v.split([',', '\n'])
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|v| crate::flags::split_launch_args(&v))
             .unwrap_or_default(),
         extensions,
         storage_state: env::var("AGENT_BROWSER_STATE").ok(),
