@@ -5865,6 +5865,52 @@ async fn e2e_ref_recovery_moved_duplicates_keep_exact_node() {
 
 #[tokio::test]
 #[ignore]
+async fn e2e_ref_recovery_object_path_treats_detached_node_as_stale() {
+    let mut state = DaemonState::new();
+    let snapshot = ref_recovery_setup(
+        &mut state,
+        r#"<div id="c"><button>Approve</button><button>Approve</button></div><div id="u"><input aria-label="Email"></div>"#,
+    )
+    .await;
+    let approve = ref_recovery_refs(&snapshot, "Approve");
+    let email = ref_recovery_refs(&snapshot, "Email");
+    assert_eq!((approve.len(), email.len()), (2, 1), "{snapshot}");
+
+    ref_recovery_eval(
+        &mut state,
+        "c.innerHTML = '<button>Approve</button><button>Approve</button>'; u.innerHTML = '<input aria-label=\"Email\">'; true",
+    )
+    .await;
+
+    let resp = execute_command(
+        &json!({ "id": "g1", "action": "gettext", "selector": approve[0] }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Run snapshot again"),
+        "{resp}"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "f1", "action": "fill", "selector": email[0], "value": "a@b.co" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let value = ref_recovery_eval(&mut state, "u.querySelector('input').value").await;
+    assert_eq!(value, "a@b.co");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
 async fn e2e_ref_recovery_object_fallback_requires_unique_match() {
     let mut state = DaemonState::new();
     ref_recovery_setup(

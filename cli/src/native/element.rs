@@ -699,7 +699,9 @@ pub async fn resolve_element_object_id(
 
             if let Ok(r) = result {
                 if let Some(object_id) = r.object.object_id {
-                    return Ok((object_id, effective_session_id.to_string()));
+                    if !is_detached(client, effective_session_id, &object_id).await {
+                        return Ok((object_id, effective_session_id.to_string()));
+                    }
                 }
             }
             if !entry.allow_role_fallback {
@@ -782,6 +784,34 @@ pub async fn resolve_element_object_id(
         .object_id
         .ok_or_else(|| format!("Element not found: {}", selector_or_ref))?;
     Ok((object_id, session_id.to_string()))
+}
+
+/// Reports whether a resolved node has been removed from its document, releasing it if so.
+async fn is_detached(client: &CdpClient, session_id: &str, object_id: &str) -> bool {
+    let result: Result<EvaluateResult, String> = client
+        .send_command_typed(
+            "Runtime.callFunctionOn",
+            &CallFunctionOnParams {
+                function_declaration: "function() { return this.isConnected; }".to_string(),
+                object_id: Some(object_id.to_string()),
+                arguments: None,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await;
+    let detached = matches!(result, Ok(r) if r.result.value == Some(Value::Bool(false)));
+    if detached {
+        let _ = client
+            .send_command(
+                "Runtime.releaseObject",
+                Some(serde_json::json!({ "objectId": object_id })),
+                Some(session_id),
+            )
+            .await;
+    }
+    detached
 }
 
 /// Determine which CDP session and parameters to use for an AX tree query.

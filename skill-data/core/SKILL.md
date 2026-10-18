@@ -442,7 +442,7 @@ agent-browser doctor --json              # structured output for programmatic co
 
 **"Ref not found" / "Element not found: @eN"** Page changed since the snapshot. Run `agent-browser snapshot -i` again, then use the new refs.
 
-**"Stale ref ... cannot be recovered"** The element was replaced and duplicates make the match ambiguous, so nothing was clicked. Run `agent-browser snapshot -i` and use a fresh ref.
+**"Stale ref ... cannot be recovered"** The element was replaced and duplicates make the match ambiguous, so the action did not run. Run `agent-browser snapshot -i` and use a fresh ref.
 
 **Element exists in the DOM but not in the snapshot** It's probably off-screen or not yet rendered. Try:
 
