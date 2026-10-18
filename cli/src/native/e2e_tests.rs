@@ -5875,6 +5875,9 @@ async fn e2e_ref_recovery_object_fallback_requires_unique_match() {
     state
         .ref_map
         .add("e900".to_string(), None, "textbox", "Name", None);
+    state
+        .ref_map
+        .add("e901".to_string(), None, "textbox", "Name", Some(0));
 
     let resp = execute_command(
         &json!({ "id": "f1", "action": "fill", "selector": "@e900", "value": "hello" }),
@@ -5892,6 +5895,20 @@ async fn e2e_ref_recovery_object_fallback_requires_unique_match() {
     assert_eq!(values, "|");
 
     ref_recovery_eval(&mut state, "document.getElementById('b').remove(); true").await;
+    let resp = execute_command(
+        &json!({ "id": "f3", "action": "fill", "selector": "@e901", "value": "marked" }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    let error = resp["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("the snapshot had several matching elements"),
+        "{error}"
+    );
+    let value = ref_recovery_eval(&mut state, "document.getElementById('a').value").await;
+    assert_eq!(value, "");
+
     let resp = execute_command(
         &json!({ "id": "f2", "action": "fill", "selector": "@e900", "value": "hello" }),
         &mut state,

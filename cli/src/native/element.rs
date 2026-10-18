@@ -1598,6 +1598,20 @@ mod tests {
     }
 
     #[test]
+    fn test_select_unique_node_id_keeps_not_found_and_missing_id_errors() {
+        let nodes = vec![ax("button", "Reject", Some(1), false)];
+        assert_eq!(
+            select_unique_node_id(&nodes, "button", "Approve"),
+            Err("Could not locate element with role=button name=Approve".to_string())
+        );
+        let nodes = vec![ax("button", "Approve", None, false)];
+        assert_eq!(
+            select_unique_node_id(&nodes, "button", "Approve"),
+            Err("AX node has no backendDOMNodeId for role=button name=Approve".to_string())
+        );
+    }
+
+    #[test]
     fn test_parse_ref_at_prefix() {
         assert_eq!(parse_ref("@e1"), Some("e1".to_string()));
         assert_eq!(parse_ref("@e123"), Some("e123".to_string()));
