@@ -10,7 +10,8 @@ const CONFIG_FILENAME: &str = "config.json";
 const PROJECT_CONFIG_FILENAME: &str = "agent-browser.json";
 
 /// Split `--args` into launch args. Newlines always separate args; commas separate
-/// only before another flag, so values like `--disable-features=A,B` stay whole.
+/// only before another `--` flag, so values like `--disable-features=A,B` and
+/// `--window-position=-32000,-32000` stay whole.
 pub fn split_launch_args(input: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -18,7 +19,10 @@ pub fn split_launch_args(input: &str) -> Vec<String> {
     while let Some(ch) = chars.next() {
         let ends_arg = match ch {
             '\n' | '\r' => true,
-            ',' => chars.clone().find(|c| *c != ' ' && *c != '\t') == Some('-'),
+            ',' => {
+                let mut rest = chars.clone().skip_while(|c| *c == ' ' || *c == '\t');
+                rest.next() == Some('-') && rest.next() == Some('-')
+            }
             _ => false,
         };
         if ends_arg {
@@ -1327,6 +1331,18 @@ mod tests {
         assert_eq!(
             split_launch_args("--window-size=1280,720,--no-sandbox"),
             vec!["--window-size=1280,720", "--no-sandbox"]
+        );
+    }
+
+    #[test]
+    fn test_split_launch_args_keeps_negative_numbers_inside_values() {
+        assert_eq!(
+            split_launch_args("--window-position=-32000,-32000"),
+            vec!["--window-position=-32000,-32000"]
+        );
+        assert_eq!(
+            split_launch_args("--window-position=-30, -40,--no-sandbox"),
+            vec!["--window-position=-30, -40", "--no-sandbox"]
         );
     }
 
