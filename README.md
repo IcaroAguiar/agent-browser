@@ -1274,6 +1274,8 @@ agent-browser hover @e4                   # Hover the link
 
 When a ref click is blocked by an overlay, the error includes the covering element, such as `covered by <div#consent-banner>`. Click the banner or dialog control first, then run `snapshot` again before reusing refs.
 
+If a ref's element was replaced, agent-browser uses the one element with the same role and name. When duplicates make that ambiguous, the action fails without acting. Run `snapshot` again and use a fresh ref.
+
 **Why use refs?**
 
 - **Deterministic**: Ref points to exact element from snapshot
