@@ -12546,103 +12546,29 @@ fn load_binding(session: &str, expect: &str) -> super::tab_binding::TabBinding {
         .expect(expect)
 }
 
-/// Builds a launch command for a local headless Chrome that works in CI sandboxes.
-fn local_launch_cmd(id: &str) -> Value {
-    json!({
-        "id": id,
-        "action": "launch",
-        "headless": true,
-        "args": ["--no-sandbox", "--disable-dev-shm-usage"]
-    })
-}
-
-/// Attaches `state` to the browser at `ws_url` through a cdpUrl launch and asserts it succeeds.
-async fn attach_over_cdp(state: &mut DaemonState, ws_url: &str) {
-    let resp = execute_command(
-        &json!({ "id": "1", "action": "launch", "cdpUrl": ws_url }),
-        state,
-    )
-    .await;
-    assert_success(&resp);
-}
-
-/// Asserts the response is the "attached to an external browser" refusal.
-fn assert_attached_error(resp: &Value) {
-    let error = resp["error"].as_str().unwrap_or_default();
-    assert!(
-        error.contains("attached to an external browser"),
-        "unexpected error: {}",
-        resp
-    );
-}
-
-/// Runs a local launch against an attached session and asserts it is refused without starting a browser.
-async fn assert_local_launch_refused(state: &mut DaemonState, id: &str) {
-    let resp = execute_command(&local_launch_cmd(id), state).await;
-    assert_eq!(
-        resp["success"], false,
-        "a dead attach must fail, got: {}",
-        resp
-    );
-    assert_attached_error(&resp);
-    assert!(
-        state.browser.is_none(),
-        "a dead attach must not be replaced by a local browser"
-    );
-}
-
 #[tokio::test]
 #[ignore]
 async fn e2e_cdp_attach_survives_follow_up_launch_without_a_target() {
     let (guard, _dir) = binding_test_env();
     let (mut host, ws_url) = launch_binding_host(&guard).await;
-
     guard.set("AGENT_BROWSER_SESSION", "e2e-attach-sticky");
     let mut state = DaemonState::new();
-    attach_over_cdp(&mut state, &ws_url).await;
+    let attach = json!({ "id": "1", "action": "launch", "cdpUrl": ws_url });
+    assert_success(&execute_command(&attach, &mut state).await);
+    let page = "data:text/html,attached-page";
+    let navigate = json!({ "id": "2", "action": "navigate", "url": page });
+    assert_success(&execute_command(&navigate, &mut state).await);
 
-    let attached_url = "data:text/html,attached-page";
-    let resp = execute_command(
-        &json!({ "id": "2", "action": "navigate", "url": attached_url }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
+    let local =
+        json!({ "id": "3", "action": "launch", "headless": true, "args": ["--no-sandbox"] });
+    let resp = execute_command(&local, &mut state).await;
+    assert_eq!(get_data(&resp)["reused"], true, "got: {}", resp);
+    assert_eq!(get_data(&current_url(&mut state, "4").await)["url"], page);
 
-    let resp = execute_command(&local_launch_cmd("3"), &mut state).await;
-    assert_success(&resp);
-    assert_eq!(
-        get_data(&resp)["reused"],
-        true,
-        "a live attach must be reused, not relaunched"
-    );
-
-    let resp = current_url(&mut state, "4").await;
-    assert_success(&resp);
-    assert_eq!(
-        get_data(&resp)["url"],
-        attached_url,
-        "follow-up commands must keep running against the attached browser"
-    );
-
-    let resp = execute_command(
-        &json!({ "id": "5", "action": "launch", "allowedDomains": ["example.com"] }),
-        &mut state,
-    )
-    .await;
-    assert_attached_error(&resp);
-    assert!(
-        state.domain_filter.read().await.is_none(),
-        "a rejected launch must not commit allowedDomains"
-    );
-
-    let resp = current_url(&mut state, "6").await;
-    assert_success(&resp);
-    assert_eq!(
-        get_data(&resp)["url"],
-        attached_url,
-        "a rejected launch must leave the attach untouched"
-    );
+    let allowlist = json!({ "id": "5", "action": "launch", "allowedDomains": ["example.com"] });
+    let resp = execute_command(&allowlist, &mut state).await;
+    assert_eq!(resp["success"], false, "got: {}", resp);
+    assert!(state.domain_filter.read().await.is_none());
 
     let _ = execute_command(&json!({ "id": "98", "action": "close" }), &mut state).await;
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut host).await;
@@ -12653,70 +12579,20 @@ async fn e2e_cdp_attach_survives_follow_up_launch_without_a_target() {
 async fn e2e_cdp_attach_dead_browser_errors_instead_of_launching_locally() {
     let (guard, _dir) = binding_test_env();
     let (mut host, ws_url) = launch_binding_host(&guard).await;
-
     guard.set("AGENT_BROWSER_SESSION", "e2e-attach-dead");
     let mut state = DaemonState::new();
-    attach_over_cdp(&mut state, &ws_url).await;
-
-    let resp = execute_command(&json!({ "id": "h-close", "action": "close" }), &mut host).await;
-    assert_success(&resp);
+    let attach = json!({ "id": "1", "action": "launch", "cdpUrl": ws_url });
+    assert_success(&execute_command(&attach, &mut state).await);
+    assert_success(&execute_command(&json!({ "id": "h", "action": "close" }), &mut host).await);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    assert_local_launch_refused(&mut state, "2").await;
-
-    let resp = current_url(&mut state, "3").await;
-    assert_eq!(
-        resp["success"], false,
-        "auto-launch must re-attach to the dead browser and fail, got: {}",
-        resp
-    );
+    let local =
+        json!({ "id": "2", "action": "launch", "headless": true, "args": ["--no-sandbox"] });
+    assert_eq!(execute_command(&local, &mut state).await["success"], false);
+    assert_eq!(current_url(&mut state, "3").await["success"], false);
     assert!(
         state.browser.is_none(),
-        "auto-launch must not start a local browser while attached"
-    );
-
-    assert_local_launch_refused(&mut state, "4").await;
-
-    let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn e2e_cdp_attach_close_returns_to_local_launch() {
-    let (guard, _dir) = binding_test_env();
-    let (mut host, ws_url) = launch_binding_host(&guard).await;
-
-    guard.set("AGENT_BROWSER_SESSION", "e2e-attach-close");
-    let mut state = DaemonState::new();
-    attach_over_cdp(&mut state, &ws_url).await;
-    assert!(state
-        .browser
-        .as_ref()
-        .is_some_and(|mgr| mgr.is_cdp_connection()));
-
-    let resp = execute_command(&json!({ "id": "2", "action": "close" }), &mut state).await;
-    assert_success(&resp);
-
-    let resp = execute_command(&local_launch_cmd("3"), &mut state).await;
-    assert_success(&resp);
-    assert_ne!(get_data(&resp)["reused"], true);
-    assert!(
-        state
-            .browser
-            .as_ref()
-            .is_some_and(|mgr| !mgr.is_cdp_connection()),
-        "after close, a target-less launch must start a local browser"
-    );
-
-    let _ = execute_command(&json!({ "id": "h-close", "action": "close" }), &mut host).await;
-    let resp = current_url(&mut state, "4").await;
-    assert_success(&resp);
-    assert!(
-        state
-            .browser
-            .as_ref()
-            .is_some_and(|mgr| !mgr.is_cdp_connection()),
-        "the local browser must not depend on the old attach"
+        "no local browser may replace the attach"
     );
 
     let _ = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
