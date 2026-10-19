@@ -55,15 +55,21 @@ async function main() {
     }
   }
 
+  let runPath = binaryPath;
   try {
-    const { linkNative } = await import('../scripts/link-native.js');
-    linkNative({ packageRoot, binary: binaryPath, target, entries: [process.argv[1]] });
+    const { linkNative, materializeBinary } = await import('../scripts/link-native.js');
+    try {
+      runPath = materializeBinary(packageRoot, binaryPath, target);
+    } catch {
+      runPath = binaryPath;
+    }
+    linkNative({ packageRoot, binary: runPath, target, entries: [process.argv[1]] });
   } catch {
     // Linking is an optimization; this launcher keeps working without it.
   }
 
   // Spawn the native binary with inherited stdio
-  const child = spawn(binaryPath, process.argv.slice(2), {
+  const child = spawn(runPath, process.argv.slice(2), {
     stdio: 'inherit',
     windowsHide: false,
   });

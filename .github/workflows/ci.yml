@@ -402,6 +402,10 @@ jobs:
           echo "Shim correctly points to native binary"
         shell: pwsh
 
+      - name: Verify skills resolve from the linked binary
+        run: agent-browser skills list | grep -qE '^[[:space:]]*core[[:space:]]'
+        shell: bash
+
       - name: Verify uninstall removes the linked bin entry
         run: |
           npm uninstall -g agent-browser @agent-browser/${{ matrix.package }}
