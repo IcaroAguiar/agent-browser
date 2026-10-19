@@ -353,6 +353,85 @@ fn launch_connection_identity(
     ("local", None)
 }
 
+/// Launch fields that only describe a browser agent-browser starts itself. The CLI never
+/// sends them with an external target, so a launch that inherits one drops them.
+const LOCAL_ONLY_LAUNCH_FIELDS: &[&str] = &[
+    "allowFileAccess",
+    "args",
+    "engine",
+    "executablePath",
+    "extensions",
+    "headless",
+    "hideScrollbars",
+    "noXvfb",
+    "profile",
+    "proxy",
+    "proxyBypass",
+    "storageState",
+    "userAgent",
+    "webgpu",
+];
+
+/// External browser a session attached to. A later launch that names no connection
+/// target resolves to it, so the session stays on that browser until `close`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AttachedTarget {
+    CdpUrl(String),
+    CdpPort(u64),
+    AutoConnect,
+    Provider(String),
+}
+
+impl AttachedTarget {
+    /// Reads the connection target a launch command names, if any.
+    fn named_by(cmd: &Value) -> Option<Self> {
+        if let Some(url) = cmd.get("cdpUrl").and_then(Value::as_str) {
+            return Some(Self::CdpUrl(url.to_string()));
+        }
+        if let Some(port) = cmd.get("cdpPort").and_then(Value::as_u64) {
+            return Some(Self::CdpPort(port));
+        }
+        if cmd.get("autoConnect").and_then(Value::as_bool) == Some(true) {
+            return Some(Self::AutoConnect);
+        }
+        let provider = cmd.get("provider").and_then(Value::as_str)?;
+        (!provider.is_empty()).then(|| Self::Provider(provider.to_ascii_lowercase()))
+    }
+
+    /// The target a successful launch leaves the session attached to. The iOS and
+    /// Safari providers are WebDriver-backed and have no CDP attach to resume.
+    fn from_launch_command(cmd: &Value) -> Option<Self> {
+        Self::named_by(cmd)
+            .filter(|target| !matches!(target, Self::Provider(p) if p == "ios" || p == "safari"))
+    }
+
+    fn insert_into(&self, cmd: &mut serde_json::Map<String, Value>) {
+        let (key, value) = match self {
+            Self::CdpUrl(url) => ("cdpUrl", json!(url)),
+            Self::CdpPort(port) => ("cdpPort", json!(port)),
+            Self::AutoConnect => ("autoConnect", json!(true)),
+            Self::Provider(provider) => ("provider", json!(provider)),
+        };
+        cmd.insert(key.to_string(), value);
+    }
+}
+
+/// Points a launch that names no connection target at the browser the session is
+/// attached to, without the fields only a local launch honors, so it runs exactly
+/// like the original attach. Returns `None` when the launch needs no rewrite.
+fn resolve_launch_target(cmd: &Value, attached: Option<&AttachedTarget>) -> Option<Value> {
+    let attached = attached?;
+    if AttachedTarget::named_by(cmd).is_some() {
+        return None;
+    }
+    let mut resolved = cmd.as_object()?.clone();
+    for field in LOCAL_ONLY_LAUNCH_FIELDS {
+        resolved.remove(*field);
+    }
+    attached.insert_into(&mut resolved);
+    Some(Value::Object(resolved))
+}
+
 fn launch_connection_is_external(
     cdp_url: Option<&str>,
     cdp_port: Option<u64>,
@@ -638,6 +717,8 @@ pub struct DaemonState {
     pub idle_activity: Arc<IdleActivity>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
+    /// External browser this session attached to; target-less launches resolve to it.
+    attached_target: Option<AttachedTarget>,
     effective_ca_cert: Option<EffectiveCaCert>,
     /// Whether browser-level auto-attach has been enabled for the current
     /// browser so top-level popups pause before their first request.
@@ -762,6 +843,7 @@ impl DaemonState {
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
             launch_hash: None,
+            attached_target: None,
             effective_ca_cert: None,
             network_auto_attach_installed: false,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
@@ -2637,6 +2719,7 @@ fn policy_actions_for_command(
     cmd: &Value,
     action: &str,
     needs_implicit_launch: bool,
+    attached: Option<&AttachedTarget>,
 ) -> Vec<String> {
     let mut actions = vec![action.to_string()];
     // `a11y <url>` performs a real browser navigation before the audit. Keep
@@ -2653,22 +2736,14 @@ fn policy_actions_for_command(
     }
     if action == "launch" {
         let plugins = plugins_from_command_or_env(cmd);
-        if let Some(provider) = cmd.get("provider").and_then(|v| v.as_str()) {
-            append_browser_provider_policy_action_for(&mut actions, provider, &plugins);
-        }
-
-        let local_launch = cmd.get("provider").is_none()
-            && cmd.get("cdpUrl").is_none()
-            && cmd.get("cdpPort").is_none()
-            && !cmd
-                .get("autoConnect")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        if local_launch {
-            append_launch_mutator_policy_actions_for(&mut actions, &plugins);
-        }
+        let resolved = resolve_launch_target(cmd, attached);
+        append_launch_policy_actions(&mut actions, resolved.as_ref().unwrap_or(cmd), &plugins);
     } else if !skip_launch_action(action) && needs_implicit_launch {
         let plugins = plugins_from_command_or_env(cmd);
+        if let Some(launch) = resolve_launch_target(&json!({ "action": "launch" }), attached) {
+            append_launch_policy_actions(&mut actions, &launch, &plugins);
+            return actions;
+        }
         let provider_launch = env::var("AGENT_BROWSER_PROVIDER")
             .ok()
             .map(|provider| provider.to_lowercase())
@@ -2680,6 +2755,27 @@ fn policy_actions_for_command(
         }
     }
     actions
+}
+
+fn append_launch_policy_actions(
+    actions: &mut Vec<String>,
+    launch: &Value,
+    plugins: &[crate::plugins::PluginConfig],
+) {
+    if let Some(provider) = launch.get("provider").and_then(|v| v.as_str()) {
+        append_browser_provider_policy_action_for(actions, provider, plugins);
+    }
+
+    let local_launch = launch.get("provider").is_none()
+        && launch.get("cdpUrl").is_none()
+        && launch.get("cdpPort").is_none()
+        && !launch
+            .get("autoConnect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    if local_launch {
+        append_launch_mutator_policy_actions_for(actions, plugins);
+    }
 }
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
@@ -2832,7 +2928,8 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
-    let policy_actions = policy_actions_for_command(cmd, action, needs_launch);
+    let policy_actions =
+        policy_actions_for_command(cmd, action, needs_launch, state.attached_target.as_ref());
 
     // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
@@ -2925,7 +3022,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
                 let _ = auto_save_restore_state(state).await;
             }
             if let Err(e) = auto_launch(state, plugins_from_command_or_env(cmd)).await {
-                let context = auto_launch_error_context(env::var("AGENT_BROWSER_CDP").is_ok());
+                let context = auto_launch_error_context(
+                    env::var("AGENT_BROWSER_CDP").is_ok() || state.attached_target.is_some(),
+                );
                 return error_response(&id, &format!("{}: {}", context, e));
             }
             state.webmcp_enabled = launch_options_from_env().webmcp;
@@ -4050,6 +4149,11 @@ async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
 ) -> Result<(), String> {
+    if state.attached_target.is_some() {
+        return handle_launch(&json!({ "action": "launch", "plugins": plugins }), state)
+            .await
+            .map(|_| ());
+    }
     if env::var("AGENT_BROWSER_CDP").is_ok()
         || env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok()
         || !env::var("AGENT_BROWSER_PROVIDER")
@@ -4865,6 +4969,27 @@ async fn handle_launch(cmd: &Value, state: &mut DaemonState) -> Result<Value, St
 }
 
 async fn handle_launch_with_deadline(
+    cmd: &Value,
+    state: &mut DaemonState,
+    deadline: std::time::Duration,
+) -> Result<Value, String> {
+    let resolved = resolve_launch_target(cmd, state.attached_target.as_ref());
+    let inherited = resolved.is_some();
+    let cmd = resolved.as_ref().unwrap_or(cmd);
+    match handle_launch_for_target(cmd, state, deadline).await {
+        Ok(result) => {
+            state.attached_target = AttachedTarget::from_launch_command(cmd);
+            Ok(result)
+        }
+        Err(err) if inherited => Err(format!(
+            "{}. This session is attached to an external browser; run close first to go back to a locally launched browser",
+            err.trim_end_matches('.')
+        )),
+        Err(err) => Err(err),
+    }
+}
+
+async fn handle_launch_for_target(
     cmd: &Value,
     state: &mut DaemonState,
     deadline: std::time::Duration,
@@ -5724,6 +5849,7 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
     close_all_browser_backends(state).await?;
+    state.attached_target = None;
 
     // Stop background Fetch handler
     if let Some(task) = state.fetch_handler_task.take() {
@@ -14739,7 +14865,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true);
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
 
         assert_eq!(actions[0], "navigate");
         assert!(actions.contains(&"plugin:stealth:launch.mutate".to_string()));
@@ -14762,7 +14888,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", false);
+        let actions = policy_actions_for_command(&cmd, "navigate", false, None);
 
         assert_eq!(actions, vec!["navigate".to_string()]);
     }
@@ -14780,11 +14906,11 @@ mod tests {
         });
 
         assert_eq!(
-            policy_actions_for_command(&with_url, "a11y", false),
+            policy_actions_for_command(&with_url, "a11y", false, None),
             vec!["a11y".to_string(), "navigate".to_string()]
         );
         assert_eq!(
-            policy_actions_for_command(&current_page, "a11y", false),
+            policy_actions_for_command(&current_page, "a11y", false, None),
             vec!["a11y".to_string()]
         );
     }
@@ -14811,10 +14937,40 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true);
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
 
         assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
         assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
+    }
+
+    #[test]
+    fn test_policy_actions_follow_inherited_provider_attach() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_PROVIDER"]);
+        guard.remove("AGENT_BROWSER_PROVIDER");
+        let plugins = json!([
+            {
+                "name": "browserbox",
+                "command": "agent-browser-plugin-browserbox",
+                "capabilities": ["browser.provider"]
+            },
+            {
+                "name": "stealth",
+                "command": "agent-browser-plugin-stealth",
+                "capabilities": ["launch.mutate"]
+            }
+        ]);
+        let attached = AttachedTarget::Provider("browserbox".to_string());
+        let launch = json!({ "action": "launch", "headless": false, "plugins": plugins });
+        let navigate =
+            json!({ "action": "navigate", "url": "https://example.com", "plugins": plugins });
+
+        for actions in [
+            policy_actions_for_command(&launch, "launch", false, Some(&attached)),
+            policy_actions_for_command(&navigate, "navigate", true, Some(&attached)),
+        ] {
+            assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
+            assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
+        }
     }
 
     #[test]
@@ -14839,7 +14995,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true);
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
 
         assert_eq!(actions, vec!["navigate".to_string()]);
     }
@@ -14865,7 +15021,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "auth_login", false);
+        let actions = policy_actions_for_command(&cmd, "auth_login", false, None);
 
         assert_eq!(actions, vec!["auth_login".to_string()]);
     }
@@ -16932,6 +17088,241 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 "rejected external launch should not commit allowedDomains"
             );
         }
+    }
+
+    const ATTACHED_SUFFIX: &str = "This session is attached to an external browser; run close first to go back to a locally launched browser";
+
+    /// Runs `handle_launch` on a state already attached to `target` and returns the error with the state.
+    async fn launch_while_attached(target: AttachedTarget, cmd: Value) -> (String, DaemonState) {
+        let mut state = DaemonState::new();
+        state.attached_target = Some(target);
+        let error = handle_launch(&cmd, &mut state).await.unwrap_err();
+        (error, state)
+    }
+
+    /// Asserts a refused launch left no browser, kept the attach, and told the user to close first.
+    fn assert_attach_kept(error: &str, state: &DaemonState, target: AttachedTarget) {
+        assert!(state.browser.is_none(), "no connection should be attempted");
+        assert_eq!(
+            state.attached_target,
+            Some(target),
+            "a failed launch must keep the attach"
+        );
+        assert!(error.ends_with(ATTACHED_SUFFIX), "got: {}", error);
+    }
+
+    #[test]
+    fn test_attached_target_from_launch_command() {
+        let cases = [
+            (
+                json!({ "action": "launch", "cdpUrl": "ws://127.0.0.1:9222/devtools/browser/x" }),
+                Some(AttachedTarget::CdpUrl(
+                    "ws://127.0.0.1:9222/devtools/browser/x".to_string(),
+                )),
+            ),
+            (
+                json!({ "action": "launch", "cdpPort": 9222 }),
+                Some(AttachedTarget::CdpPort(9222)),
+            ),
+            (
+                json!({ "action": "launch", "autoConnect": true }),
+                Some(AttachedTarget::AutoConnect),
+            ),
+            (json!({ "action": "launch", "autoConnect": false }), None),
+            (
+                json!({ "action": "launch", "provider": "Browserbase" }),
+                Some(AttachedTarget::Provider("browserbase".to_string())),
+            ),
+            (json!({ "action": "launch", "provider": "ios" }), None),
+            (json!({ "action": "launch", "provider": "Safari" }), None),
+            (json!({ "action": "launch", "provider": "" }), None),
+            (
+                json!({
+                    "action": "launch",
+                    "headless": true,
+                    "executablePath": "/usr/bin/chromium",
+                    "args": ["--no-sandbox"]
+                }),
+                None,
+            ),
+        ];
+        for (cmd, expected) in cases {
+            assert_eq!(
+                AttachedTarget::from_launch_command(&cmd),
+                expected,
+                "cmd: {}",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_launch_target_without_attach_or_with_own_target() {
+        let local = json!({ "action": "launch", "headless": true, "args": ["--no-sandbox"] });
+        assert_eq!(resolve_launch_target(&local, None), None);
+
+        let attached = AttachedTarget::CdpPort(9222);
+        let own_targets = [
+            json!({ "action": "launch", "cdpUrl": "ws://127.0.0.1:9333/devtools/browser/y" }),
+            json!({ "action": "launch", "cdpPort": 9333 }),
+            json!({ "action": "launch", "autoConnect": true }),
+            json!({ "action": "launch", "provider": "browserbase" }),
+            json!({ "action": "launch", "provider": "ios" }),
+        ];
+        for cmd in own_targets {
+            assert_eq!(
+                resolve_launch_target(&cmd, Some(&attached)),
+                None,
+                "cmd: {}",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_launch_target_inherits_attach_and_strips_local_fields() {
+        let mut cmd = serde_json::Map::new();
+        cmd.insert("action".to_string(), json!("launch"));
+        for field in LOCAL_ONLY_LAUNCH_FIELDS {
+            cmd.insert(field.to_string(), json!(format!("local-{}", field)));
+        }
+        cmd.insert("provider".to_string(), json!(""));
+        cmd.insert("allowedDomains".to_string(), json!(["example.com"]));
+        cmd.insert("caCert".to_string(), json!("/tmp/proxy-ca.pem"));
+        cmd.insert("initScripts".to_string(), json!(["/tmp/init.js"]));
+        cmd.insert("colorScheme".to_string(), json!("dark"));
+        let cmd = Value::Object(cmd);
+
+        let targets = [
+            (
+                AttachedTarget::CdpUrl("ws://127.0.0.1:9222/devtools/browser/x".to_string()),
+                "cdpUrl",
+                json!("ws://127.0.0.1:9222/devtools/browser/x"),
+            ),
+            (AttachedTarget::CdpPort(9222), "cdpPort", json!(9222)),
+            (AttachedTarget::AutoConnect, "autoConnect", json!(true)),
+            (
+                AttachedTarget::Provider("browserbase".to_string()),
+                "provider",
+                json!("browserbase"),
+            ),
+        ];
+        for (attached, key, value) in targets {
+            let resolved = resolve_launch_target(&cmd, Some(&attached))
+                .expect("a target-less launch should inherit the attach");
+            assert_eq!(resolved[key], value, "target key for {:?}", attached);
+            for field in LOCAL_ONLY_LAUNCH_FIELDS {
+                assert!(
+                    resolved.get(*field).is_none(),
+                    "{} should be stripped for {:?}",
+                    field,
+                    attached
+                );
+            }
+            assert_eq!(resolved["action"], "launch");
+            assert_eq!(resolved["allowedDomains"], json!(["example.com"]));
+            assert_eq!(resolved["caCert"], "/tmp/proxy-ca.pem");
+            assert_eq!(resolved["initScripts"], json!(["/tmp/init.js"]));
+            assert_eq!(resolved["colorScheme"], "dark");
+            assert_eq!(
+                AttachedTarget::from_launch_command(&resolved),
+                Some(attached.clone())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_inherited_cdp_attach_refuses_allowed_domains_before_connecting() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+
+        let (error, state) = launch_while_attached(
+            AttachedTarget::CdpPort(9222),
+            json!({
+                "action": "launch",
+                "headless": true,
+                "args": ["--no-sandbox"],
+                "allowedDomains": ["example.com"]
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            error,
+            format!(
+                "--allowed-domains is not supported with --cdp because WebRTC containment cannot be installed before existing page scripts run. {}",
+                ATTACHED_SUFFIX
+            )
+        );
+        assert_attach_kept(&error, &state, AttachedTarget::CdpPort(9222));
+        assert!(
+            state.domain_filter.read().await.is_none(),
+            "rejected inherited launch should not commit allowedDomains"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inherited_provider_attach_is_not_refused_by_allowed_domains_guard() {
+        let guard = EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_PLUGINS",
+            "BROWSERBASE_API_KEY",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_PLUGINS");
+        guard.remove("BROWSERBASE_API_KEY");
+
+        let target = AttachedTarget::Provider("browserbase".to_string());
+        let (error, state) = launch_while_attached(
+            target.clone(),
+            json!({ "action": "launch", "allowedDomains": ["example.com"] }),
+        )
+        .await;
+
+        assert!(
+            !error.contains("--allowed-domains"),
+            "provider attach should pass the allowed-domains guard, got: {}",
+            error
+        );
+        assert!(error.contains("BROWSERBASE_API_KEY"), "got: {}", error);
+        assert_attach_kept(&error, &state, target);
+    }
+
+    #[tokio::test]
+    async fn test_inherited_cdp_attach_refuses_ca_cert() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        let dir = tempfile::tempdir().unwrap();
+        let ca_path = dir.path().join("proxy-ca.pem");
+        fs::write(&ca_path, crate::ca_bundle::TEST_PEM).unwrap();
+
+        let (error, state) = launch_while_attached(
+            AttachedTarget::CdpPort(9222),
+            json!({
+                "action": "launch",
+                "headless": true,
+                "caCert": ca_path.to_str().unwrap()
+            }),
+        )
+        .await;
+
+        assert!(error.starts_with("CA trust is active"), "got: {}", error);
+        assert!(
+            state.effective_ca_cert.is_none(),
+            "a refused launch must not store the CA cert"
+        );
+        assert_attach_kept(&error, &state, AttachedTarget::CdpPort(9222));
+    }
+
+    #[tokio::test]
+    async fn test_close_clears_attached_target() {
+        let mut state = DaemonState::new();
+        state.attached_target = Some(AttachedTarget::CdpUrl(
+            "ws://127.0.0.1:9222/devtools/browser/x".to_string(),
+        ));
+        let result = handle_close(&mut state).await.unwrap();
+        assert_eq!(result["closed"], true);
+        assert_eq!(state.attached_target, None);
     }
 
     #[tokio::test]

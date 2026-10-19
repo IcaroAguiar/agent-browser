@@ -18,6 +18,8 @@ agent-browser close
 agent-browser --cdp 9222 snapshot
 ```
 
+The session stays attached until `agent-browser close`. Later commands without a connection flag run against the same browser, as if you passed `--cdp` again. If that browser goes away, commands fail instead of launching a local one.
+
 ## Remote WebSocket URLs
 
 Connect to remote browser services via WebSocket URL:

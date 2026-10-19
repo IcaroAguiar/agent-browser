@@ -98,20 +98,9 @@ fn validate(cert: &CertificateDer<'_>) -> Result<(), String> {
     probe.add(cert.clone()).map_err(|e| e.to_string())
 }
 
+/// Self-signed RSA-2048 test certificate (CN=test-ca).
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn write(name: &str, body: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("ab-ca-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, body).unwrap();
-        path
-    }
-
-    /// Self-signed RSA-2048 test certificate (CN=test-ca).
-    const TEST_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+pub(crate) const TEST_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
 MIIDBTCCAe2gAwIBAgIUFhZ9tlfduuEvOIOcGuOA7E0SSL4wDQYJKoZIhvcNAQEL\n\
 BQAwEjEQMA4GA1UEAwwHdGVzdC1jYTAeFw0yNjAzMjUxNDE5MDVaFw0yNzAzMjUx\n\
 NDE5MDVaMBIxEDAOBgNVBAMMB3Rlc3QtY2EwggEiMA0GCSqGSIb3DQEBAQUAA4IB\n\
@@ -131,8 +120,20 @@ JtnWOCSAT+dNsAXmz4ebm7kp9OnpLLKjvrNEUNPA20J5S+BXTtPv7x/koRwSX35M\n\
 49s7jC+okfzl\n\
 -----END CERTIFICATE-----\n";
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(name: &str, body: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ab-ca-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
     fn pem() -> &'static str {
-        TEST_PEM
+        super::TEST_PEM
     }
 
     #[test]
