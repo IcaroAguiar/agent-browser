@@ -13,10 +13,10 @@
  * (bin/agent-browser.js) then performs the same linking on its first run.
  */
 
-import { existsSync, mkdirSync, chmodSync, createWriteStream, unlinkSync, writeFileSync } from 'fs';
-import { dirname, join } from 'path';
+import { existsSync, mkdirSync, chmodSync, createWriteStream, realpathSync, unlinkSync, writeFileSync } from 'fs';
+import { basename, dirname, isAbsolute, join, sep } from 'path';
 import { fileURLToPath } from 'url';
-import { platform, arch } from 'os';
+import { platform, arch, tmpdir } from 'os';
 import { get } from 'https';
 import { execSync } from 'child_process';
 import { findNativeBinary, nativeTarget } from './native.js';
@@ -83,12 +83,7 @@ async function downloadFile(url, dest) {
  * e.g. "pnpm/8.10.0 node/v20.10.0 linux x64"
  */
 function writeInstallMethod() {
-  const ua = process.env.npm_config_user_agent || '';
-  let method = '';
-  if (ua.startsWith('pnpm/')) method = 'pnpm';
-  else if (ua.startsWith('yarn/')) method = 'yarn';
-  else if (ua.startsWith('bun/')) method = 'bun';
-  else if (ua.startsWith('npm/')) method = 'npm';
+  const method = detectManager();
 
   if (method) {
     try {
@@ -217,17 +212,87 @@ function showInstallReminder() {
   console.log('');
 }
 
+/** Package manager running this install, from its user agent string. */
+function detectManager() {
+  const ua = process.env.npm_config_user_agent || '';
+  return ['pnpm', 'yarn', 'bun', 'npm'].find((name) => ua.startsWith(`${name}/`)) || '';
+}
+
+/** A manager's global bin directory sits at the prefix itself on Windows. */
+function prefixToBin(prefix) {
+  return platform() === 'win32' ? prefix : join(prefix, 'bin');
+}
+
 /**
- * Point the global bin entry at the native binary for zero-overhead CLI
- * execution. npm, pnpm, yarn and bun set npm_config_global and
- * npm_config_prefix while running lifecycle scripts for global installs.
+ * True when this package is being installed globally. Only npm reports it
+ * directly; the others are recognised by the global store their files land in.
  */
-function fixGlobalInstallBin(binary) {
-  if (process.env.npm_config_global !== 'true') {
-    return;
+function isGlobalInstall() {
+  if (process.env.npm_config_global === 'true') return true;
+  const root = realpathOrSelf(projectRoot);
+  for (const dir of [process.env.PNPM_HOME, process.env.BUN_INSTALL_GLOBAL_DIR, process.env.YARN_GLOBAL_FOLDER]) {
+    if (dir && root.startsWith(realpathOrSelf(dir))) return true;
   }
+  return root.includes(`${sep}global${sep}`);
+}
+
+function realpathOrSelf(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * Global bin directories that may hold this package's bin entry: the prefix
+ * npm reports, the invoking manager's own answer, and the enclosing
+ * node_modules/.bin that Yarn Classic links through before its global link
+ * exists. linkNative only rewrites an entry resolving to this package.
+ */
+function globalBinCandidates() {
+  const candidates = [];
   const prefix = process.env.npm_config_prefix;
-  const entries = prefix && platform() !== 'win32' ? [join(prefix, 'bin', 'agent-browser')] : [];
+  if (prefix) {
+    candidates.push(prefixToBin(prefix));
+  }
+
+  const probes = {
+    pnpm: 'pnpm bin -g',
+    yarn: 'yarn global bin',
+    bun: 'bun pm bin -g',
+    npm: 'npm prefix -g',
+  };
+  const manager = detectManager();
+  const needsProbe = probes[manager] && isGlobalInstall() && !(manager === 'npm' && prefix);
+  if (needsProbe) {
+    try {
+      const out = execSync(probes[manager], {
+        encoding: 'utf8',
+        cwd: tmpdir(),
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const line = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop();
+      if (line && isAbsolute(line)) {
+        candidates.push(manager === 'npm' ? prefixToBin(line) : line);
+      }
+    } catch {
+      return candidates;
+    }
+  }
+
+  const parent = join(projectRoot, '..');
+  if (basename(parent) === 'node_modules') {
+    candidates.push(join(parent, '.bin'));
+  }
+
+  return [...new Set(candidates)];
+}
+
+/** Points the global bin entry at the native binary, skipping Node entirely. */
+function fixGlobalInstallBin(binary) {
+  const entries = globalBinCandidates().map((dir) => join(dir, 'agent-browser'));
 
   try {
     if (linkNative({ packageRoot: projectRoot, binary, target, entries })) {
