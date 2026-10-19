@@ -176,7 +176,9 @@ function relinkWindowsShims(packageRoot, linked) {
 }
 
 /**
- * Rewrites every bin entry that runs the launcher so it runs `binary`.
+ * Rewrites every bin entry that runs the launcher so it runs the native
+ * binary from this package's own bin/, which keeps skills/, skill-data/ and
+ * .install-method reachable from the executable.
  *
  * - packageRoot: this package's directory (real path)
  * - binary: the native binary found by findNativeBinary
@@ -204,7 +206,11 @@ export function linkNative({ packageRoot, binary, target, entries = [] }) {
       }
     }
     for (const shim of [entry, ...pnpmShimPaths(entry)]) {
-      changed = relinkPnpmShim(shim, launcher, realpathSafe(binary)) || changed;
+      try {
+        changed = relinkPnpmShim(shim, launcher, realpathSafe(linked())) || changed;
+      } catch {
+        // Read-only or root-owned install: keep using the launcher.
+      }
     }
   }
   return changed;
