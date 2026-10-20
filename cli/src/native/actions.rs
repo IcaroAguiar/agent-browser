@@ -6141,32 +6141,51 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
     } else {
         let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
         let session_id = mgr.active_session_id()?.to_string();
-        if annotate {
-            state.ref_map.begin_snapshot();
-            let _ = snapshot::take_snapshot(
+        let viewport_only = annotate
+            && !options.full_page
+            && options.selector.is_none()
+            && state.active_frame_id.is_none();
+        if viewport_only {
+            let refs =
+                snapshot::take_viewport_refs(&mgr.client, &session_id, &mut state.ref_map).await?;
+            let result = screenshot::take_viewport_annotated_screenshot(
                 &mgr.client,
                 &session_id,
-                &SnapshotOptions {
-                    interactive: true,
-                    ..SnapshotOptions::default()
-                },
-                &mut state.ref_map,
-                state.active_frame_id.as_deref(),
+                &state.ref_map,
+                &options,
+                &state.iframe_sessions,
+                refs,
+            )
+            .await?;
+            (session_id, result)
+        } else {
+            if annotate {
+                state.ref_map.begin_snapshot();
+                let _ = snapshot::take_snapshot(
+                    &mgr.client,
+                    &session_id,
+                    &SnapshotOptions {
+                        interactive: true,
+                        ..SnapshotOptions::default()
+                    },
+                    &mut state.ref_map,
+                    state.active_frame_id.as_deref(),
+                    &state.iframe_sessions,
+                )
+                .await?;
+            }
+
+            let result = screenshot::take_screenshot(
+                &mgr.client,
+                &session_id,
+                &state.ref_map,
+                &options,
                 &state.iframe_sessions,
             )
             .await?;
+
+            (session_id, result)
         }
-
-        let result = screenshot::take_screenshot(
-            &mgr.client,
-            &session_id,
-            &state.ref_map,
-            &options,
-            &state.iframe_sessions,
-        )
-        .await?;
-
-        (session_id, result)
     };
 
     let mut response = if if_changed {

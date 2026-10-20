@@ -475,11 +475,6 @@ pub async fn take_snapshot(
         root_indices
     };
 
-    let mut tracker = RoleNameTracker::new();
-    let mut next_ref: usize = ref_map.next_ref_num();
-
-    let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
-
     // Pre-collect cursor-interactive elements so we can mark them with refs during tree building
     let cursor_elements: HashMap<i64, CursorElementInfo> =
         find_cursor_interactive_elements(client, session_id)
@@ -488,82 +483,14 @@ pub async fn take_snapshot(
 
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
 
-    for (idx, node) in tree_nodes.iter().enumerate() {
-        let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
-
-        if node
-            .backend_node_id
-            .is_some_and(|bid| cursor_elements.contains_key(&bid))
-        {
-            // ref elements that are cursor-interactive
-            should_ref = true;
-        }
-
-        if should_ref {
-            let nth = tracker.track(role, &node.name, idx);
-            nodes_with_refs.push((idx, nth));
-        }
-    }
-
-    let duplicates = tracker.get_duplicates();
-
-    for (idx, nth) in &nodes_with_refs {
-        let node = &tree_nodes[*idx];
-        let key = format!("{}:{}", node.role, node.name);
-        let actual_nth = if duplicates.contains_key(&key) {
-            Some(*nth)
-        } else {
-            None
-        };
-
-        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx]
-            .backend_node_id
-            .filter(|_| document_is_known)
-        {
-            if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
-                existing.to_string()
-            } else {
-                let allocated = format!("e{}", next_ref);
-                next_ref += 1;
-                ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
-                allocated
-            }
-        } else {
-            let allocated = format!("e{}", next_ref);
-            next_ref += 1;
-            allocated
-        };
-
-        ref_map.add_with_frame(
-            ref_id.clone(),
-            tree_nodes[*idx].backend_node_id,
-            &tree_nodes[*idx].role,
-            &tree_nodes[*idx].name,
-            actual_nth,
-            frame_id,
-        );
-
-        tree_nodes[*idx].has_ref = true;
-        tree_nodes[*idx].ref_id = Some(ref_id);
-    }
-
-    // Populate cursor_info for ref-bearing nodes
-    for (idx, _) in &nodes_with_refs {
-        if let Some(bid) = tree_nodes[*idx].backend_node_id {
-            if let Some(cursor_info) = cursor_elements.get(&bid) {
-                tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
-            }
-        }
-    }
-
-    ref_map.set_next_ref_num(next_ref);
+    assign_refs(
+        &mut tree_nodes,
+        &cursor_elements,
+        ref_map,
+        session_id,
+        frame_id,
+        document_is_known,
+    );
 
     if options.urls {
         let link_nodes: Vec<(usize, i64)> = tree_nodes
@@ -724,6 +651,306 @@ pub async fn take_snapshot(
     Ok(trimmed)
 }
 
+/// Gives refs to interactive, named content, and cursor-interactive nodes, reusing durable refs for known documents.
+fn assign_refs(
+    tree_nodes: &mut [TreeNode],
+    cursor_elements: &HashMap<i64, CursorElementInfo>,
+    ref_map: &mut RefMap,
+    session_id: &str,
+    frame_id: Option<&str>,
+    document_is_known: bool,
+) -> Vec<usize> {
+    let mut tracker = RoleNameTracker::new();
+    let mut next_ref: usize = ref_map.next_ref_num();
+
+    let mut nodes_with_refs: Vec<(usize, usize)> = Vec::new();
+
+    for (idx, node) in tree_nodes.iter().enumerate() {
+        let role = node.role.as_str();
+        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
+            true
+        } else if CONTENT_ROLES.contains(&role) {
+            !node.name.is_empty()
+        } else {
+            false
+        };
+
+        if node
+            .backend_node_id
+            .is_some_and(|bid| cursor_elements.contains_key(&bid))
+        {
+            // ref elements that are cursor-interactive
+            should_ref = true;
+        }
+
+        if should_ref {
+            let nth = tracker.track(role, &node.name, idx);
+            nodes_with_refs.push((idx, nth));
+        }
+    }
+
+    let duplicates = tracker.get_duplicates();
+
+    for (idx, nth) in &nodes_with_refs {
+        let node = &tree_nodes[*idx];
+        let key = format!("{}:{}", node.role, node.name);
+        let actual_nth = if duplicates.contains_key(&key) {
+            Some(*nth)
+        } else {
+            None
+        };
+
+        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx]
+            .backend_node_id
+            .filter(|_| document_is_known)
+        {
+            if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
+                existing.to_string()
+            } else {
+                let allocated = format!("e{}", next_ref);
+                next_ref += 1;
+                ref_map.remember_durable_ref(session_id, frame_id, backend_node_id, &allocated);
+                allocated
+            }
+        } else {
+            let allocated = format!("e{}", next_ref);
+            next_ref += 1;
+            allocated
+        };
+
+        ref_map.add_with_frame(
+            ref_id.clone(),
+            tree_nodes[*idx].backend_node_id,
+            &tree_nodes[*idx].role,
+            &tree_nodes[*idx].name,
+            actual_nth,
+            frame_id,
+        );
+
+        tree_nodes[*idx].has_ref = true;
+        tree_nodes[*idx].ref_id = Some(ref_id);
+    }
+
+    // Populate cursor_info for ref-bearing nodes
+    for (idx, _) in &nodes_with_refs {
+        if let Some(bid) = tree_nodes[*idx].backend_node_id {
+            if let Some(cursor_info) = cursor_elements.get(&bid) {
+                tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
+            }
+        }
+    }
+
+    ref_map.set_next_ref_num(next_ref);
+    nodes_with_refs.into_iter().map(|(idx, _)| idx).collect()
+}
+
+/// A ref that intersects the viewport, with its `getBoundingClientRect` box in CSS pixels.
+pub struct ViewportRef {
+    pub ref_id: String,
+    pub role: String,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+const VIEWPORT_OBJECT_GROUP: &str = "agent-browser-viewport";
+
+/// Assigns refs to the elements that intersect the viewport, asking Chrome for accessibility data on those
+/// elements only, so the cost tracks what is on screen rather than the size of the page.
+/// Existing refs are kept, so refs from an earlier full snapshot stay valid.
+pub async fn take_viewport_refs(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &mut RefMap,
+) -> Result<Vec<ViewportRef>, String> {
+    client
+        .send_command_no_params("DOM.enable", Some(session_id))
+        .await?;
+    client
+        .send_command_no_params("Accessibility.enable", Some(session_id))
+        .await?;
+
+    let frame_tree = client
+        .send_command_no_params("Page.getFrameTree", Some(session_id))
+        .await
+        .ok();
+    let loader = frame_tree
+        .as_ref()
+        .and_then(|tree| frame_loader(&tree["frameTree"], None));
+    let document_is_known = ref_map.observe_document(session_id, None, session_id, loader);
+    if !document_is_known {
+        ref_map.begin_snapshot();
+    }
+
+    let scan = format!(
+        r#"
+(function() {{
+    {CURSOR_INFO_JS}
+    var W = window.innerWidth || 0, H = window.innerHeight || 0;
+    var els = [], info = [];
+    function visit(root, inShadow) {{
+        var all = root.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {{
+            var el = all[i];
+            var r = el.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < W && r.top < H) {{
+                var inBody = !inShadow && document.body && document.body.contains(el) && el !== document.body;
+                els.push(el);
+                info.push({{ x: r.x, y: r.y, width: r.width, height: r.height, cursor: inBody ? __abCursorInfo(el) : null }});
+            }}
+            if (el.shadowRoot) visit(el.shadowRoot, true);
+        }}
+    }}
+    visit(document, false);
+    window.__agentBrowserViewportElements = els;
+    return info;
+}})()
+"#
+    );
+    let scanned: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: scan,
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+    if let Some(exception) = scanned.exception_details {
+        return Err(format!("Viewport scan failed: {}", exception.text));
+    }
+    let info: Vec<Value> = scanned
+        .result
+        .value
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    let handles = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(serde_json::json!({
+                "expression": "(function(){ var e = window.__agentBrowserViewportElements || []; delete window.__agentBrowserViewportElements; return e; })()",
+                "returnByValue": false,
+                "objectGroup": VIEWPORT_OBJECT_GROUP,
+            })),
+            Some(session_id),
+        )
+        .await?;
+    let array_id = handles
+        .get("result")
+        .and_then(|r| r.get("objectId"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    let mut element_ids: Vec<Option<String>> = vec![None; info.len()];
+    if let Some(array_id) = array_id.as_deref() {
+        let props = client
+            .send_command(
+                "Runtime.getProperties",
+                Some(serde_json::json!({ "objectId": array_id, "ownProperties": true })),
+                Some(session_id),
+            )
+            .await?;
+        for prop in props
+            .get("result")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let index = prop
+                .get("name")
+                .and_then(|v| v.as_str())
+                .and_then(|n| n.parse::<usize>().ok());
+            let object_id = prop
+                .get("value")
+                .and_then(|v| v.get("objectId"))
+                .and_then(|v| v.as_str());
+            if let (Some(index), Some(object_id)) = (index, object_id) {
+                if index < element_ids.len() {
+                    element_ids[index] = Some(object_id.to_string());
+                }
+            }
+        }
+    }
+
+    let ax_futures = element_ids.iter().map(|object_id| async move {
+        let object_id = object_id.as_deref()?;
+        let result: GetFullAXTreeResult = client
+            .send_command_typed(
+                "Accessibility.getPartialAXTree",
+                &serde_json::json!({ "objectId": object_id, "fetchRelatives": false }),
+                Some(session_id),
+            )
+            .await
+            .ok()?;
+        result.nodes.into_iter().next()
+    });
+    let ax_nodes = futures_util::future::join_all(ax_futures).await;
+
+    let _ = client
+        .send_command(
+            "Runtime.releaseObjectGroup",
+            Some(serde_json::json!({ "objectGroup": VIEWPORT_OBJECT_GROUP })),
+            Some(session_id),
+        )
+        .await;
+
+    let mut nodes: Vec<AXNode> = Vec::new();
+    let mut scan_index: Vec<usize> = Vec::new();
+    let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
+    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for (i, node) in ax_nodes.into_iter().enumerate() {
+        let Some(mut node) = node else {
+            continue;
+        };
+        let Some(bid) = node.backend_d_o_m_node_id else {
+            continue;
+        };
+        if !seen.insert(bid) {
+            continue;
+        }
+        if let Some(cursor) = info[i].get("cursor").filter(|c| c.is_object()) {
+            cursor_elements.insert(bid, cursor_info_from_json(cursor));
+        }
+        node.child_ids = None;
+        nodes.push(node);
+        scan_index.push(i);
+    }
+
+    let (mut tree_nodes, _) = build_tree(&nodes);
+    promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
+    let ref_indices = assign_refs(
+        &mut tree_nodes,
+        &cursor_elements,
+        ref_map,
+        session_id,
+        None,
+        document_is_known,
+    );
+
+    let number = |value: &Value, key: &str| value.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
+    Ok(ref_indices
+        .into_iter()
+        .filter_map(|idx| {
+            let node = &tree_nodes[idx];
+            let rect = &info[scan_index[idx]];
+            Some(ViewportRef {
+                ref_id: node.ref_id.clone()?,
+                role: node.role.clone(),
+                name: node.name.clone(),
+                x: number(rect, "x"),
+                y: number(rect, "y"),
+                width: number(rect, "width"),
+                height: number(rect, "height"),
+            })
+        })
+        .collect())
+}
+
 /// Resolve the child frame ID for an iframe element given its backendNodeId.
 fn frame_loader<'a>(tree: &'a Value, frame_id: Option<&str>) -> Option<&'a str> {
     let frame = &tree["frame"];
@@ -769,6 +996,71 @@ async fn resolve_iframe_frame_id(
         .ok_or_else(|| "Could not resolve iframe frame ID".to_string())
 }
 
+/// Defines `__abCursorInfo(el)`, which returns the cursor-interactive details of one element or null.
+/// Shared by the full-page scan and the viewport scan so both apply the same rules.
+const CURSOR_INFO_JS: &str = r#"
+    var __abInteractiveRoles = {
+        'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
+        'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
+        'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
+    };
+    var __abInteractiveTags = {
+        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
+    };
+    function __abCursorInfo(el) {
+        if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) return null;
+
+        var tagName = el.tagName.toLowerCase();
+        if (__abInteractiveTags[tagName]) return null;
+
+        var role = el.getAttribute('role');
+        if (role && __abInteractiveRoles[role.toLowerCase()]) return null;
+
+        var computedStyle = getComputedStyle(el);
+        var hasCursorPointer = computedStyle.cursor === 'pointer';
+        var hasOnClick = el.hasAttribute('onclick') || el.onclick !== null;
+        var tabIndex = el.getAttribute('tabindex');
+        var hasTabIndex = tabIndex !== null && tabIndex !== '-1';
+        var ce = el.getAttribute('contenteditable');
+        var isEditable = ce === '' || ce === 'true';
+
+        if (!hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) return null;
+
+        if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
+            var parent = el.parentElement;
+            if (parent && getComputedStyle(parent).cursor === 'pointer') return null;
+        }
+
+        var text = (el.textContent || '').trim().slice(0, 100);
+
+        var rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return null;
+
+        var hiddenInputType = null;
+        var hiddenInputChecked = null;
+        var hiddenInput = el.querySelector('input[type="radio"], input[type="checkbox"]');
+        if (hiddenInput) {
+            var hiddenInputStyle = getComputedStyle(hiddenInput);
+            var isInputHidden = hiddenInputStyle.display === 'none' || hiddenInputStyle.visibility === 'hidden' || hiddenInput.hidden;
+            if (isInputHidden) {
+                hiddenInputType = hiddenInput.type;
+                hiddenInputChecked = hiddenInput.indeterminate ? 'mixed' : String(hiddenInput.checked);
+            }
+        }
+
+        return {
+            text: text,
+            tagName: tagName,
+            hasOnClick: hasOnClick,
+            hasCursorPointer: hasCursorPointer,
+            hasTabIndex: hasTabIndex,
+            isEditable: isEditable,
+            hiddenInputType: hiddenInputType,
+            hiddenInputChecked: hiddenInputChecked
+        };
+    }
+"#;
+
 async fn find_cursor_interactive_elements(
     client: &CdpClient,
     session_id: &str,
@@ -782,91 +1074,30 @@ async fn find_cursor_interactive_elements(
     // - Deduplicates inherited cursor:pointer from parent
     // - Skips empty text and zero-size elements
     // - Tags each matched element with data-__ab-ci for batch backendNodeId resolution
-    let js = r#"
-(function() {
+    let js = format!(
+        r#"
+(function() {{
     var results = [];
     if (!document.body) return results;
-
-    var interactiveRoles = {
-        'button':1, 'link':1, 'textbox':1, 'checkbox':1, 'radio':1, 'combobox':1, 'listbox':1,
-        'menuitem':1, 'menuitemcheckbox':1, 'menuitemradio':1, 'option':1, 'searchbox':1,
-        'slider':1, 'spinbutton':1, 'switch':1, 'tab':1, 'treeitem':1
-    };
-    var interactiveTags = {
-        'a':1, 'button':1, 'input':1, 'select':1, 'textarea':1, 'details':1, 'summary':1
-    };
-
+    {CURSOR_INFO_JS}
     var allElements = document.body.querySelectorAll('*');
-    for (var i = 0; i < allElements.length; i++) {
+    for (var i = 0; i < allElements.length; i++) {{
         var el = allElements[i];
-
-        if (el.closest && el.closest('[hidden], [aria-hidden="true"]')) continue;
-
-        var tagName = el.tagName.toLowerCase();
-        if (interactiveTags[tagName]) continue;
-
-        var role = el.getAttribute('role');
-        if (role && interactiveRoles[role.toLowerCase()]) continue;
-
-        var computedStyle = getComputedStyle(el);
-        var hasCursorPointer = computedStyle.cursor === 'pointer';
-        var hasOnClick = el.hasAttribute('onclick') || el.onclick !== null;
-        var tabIndex = el.getAttribute('tabindex');
-        var hasTabIndex = tabIndex !== null && tabIndex !== '-1';
-        var ce = el.getAttribute('contenteditable');
-        var isEditable = ce === '' || ce === 'true';
-
-        if (!hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) continue;
-
-        // Skip elements that only inherit cursor:pointer from an ancestor
-        if (hasCursorPointer && !hasOnClick && !hasTabIndex && !isEditable) {
-            var parent = el.parentElement;
-            if (parent && getComputedStyle(parent).cursor === 'pointer') continue;
-        }
-
-        var text = (el.textContent || '').trim().slice(0, 100);
-
-        var rect = el.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-
-        // Detect hidden radio/checkbox inputs inside this element (common pattern:
-        // <label> wrapping a display:none <input type="radio"> styled as a card).
-        // Note: we only check display/visibility/hidden, NOT opacity:0 or sr-only,
-        // because those inputs remain in Chrome's AX tree and already appear as
-        // role="radio" without promotion.
-        var hiddenInputType = null;
-        var hiddenInputChecked = null;
-        var hiddenInput = el.querySelector('input[type="radio"], input[type="checkbox"]');
-        if (hiddenInput) {
-            var hiddenInputStyle = getComputedStyle(hiddenInput);
-            var isInputHidden = hiddenInputStyle.display === 'none' || hiddenInputStyle.visibility === 'hidden' || hiddenInput.hidden;
-            if (isInputHidden) {
-                hiddenInputType = hiddenInput.type;
-                hiddenInputChecked = hiddenInput.indeterminate ? 'mixed' : String(hiddenInput.checked);
-            }
-        }
-
+        var info = __abCursorInfo(el);
+        if (!info) continue;
         el.setAttribute('data-__ab-ci', String(results.length));
-        results.push({
-            text: text,
-            tagName: tagName,
-            hasOnClick: hasOnClick,
-            hasCursorPointer: hasCursorPointer,
-            hasTabIndex: hasTabIndex,
-            isEditable: isEditable,
-            hiddenInputType: hiddenInputType,
-            hiddenInputChecked: hiddenInputChecked
-        });
-    }
+        results.push(info);
+    }}
     return results;
-})()
-"#;
+}})()
+"#
+    );
 
     let result: EvaluateResult = client
         .send_command_typed(
             "Runtime.evaluate",
             &EvaluateParams {
-                expression: js.to_string(),
+                expression: js,
                 return_by_value: Some(true),
                 await_promise: Some(false),
             },
@@ -978,80 +1209,80 @@ async fn find_cursor_interactive_elements(
     // Build the map
     let mut map: HashMap<i64, CursorElementInfo> = HashMap::new();
     for (i, elem) in elements.iter().enumerate() {
-        let backend_node_id = idx_to_backend.get(&i).copied();
-
-        // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
-        // 'focusable' for tabindex-only elements.
-        let has_cursor_pointer = elem
-            .get("hasCursorPointer")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let has_on_click = elem
-            .get("hasOnClick")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let has_tab_index = elem
-            .get("hasTabIndex")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let is_editable = elem
-            .get("isEditable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let kind = if has_cursor_pointer || has_on_click {
-            "clickable"
-        } else if is_editable {
-            "editable"
-        } else {
-            "focusable"
-        };
-
-        let mut hints: Vec<String> = Vec::new();
-        if has_cursor_pointer {
-            hints.push("cursor:pointer".to_string());
-        }
-        if has_on_click {
-            hints.push("onclick".to_string());
-        }
-        if has_tab_index {
-            hints.push("tabindex".to_string());
-        }
-        if is_editable {
-            hints.push("contenteditable".to_string());
-        }
-
-        let text = elem
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        let hidden_input_kind = elem
-            .get("hiddenInputType")
-            .and_then(|v| v.as_str())
-            .and_then(HiddenInputKind::parse);
-        let hidden_input_checked = elem
-            .get("hiddenInputChecked")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        if let Some(bid) = backend_node_id {
-            map.insert(
-                bid,
-                CursorElementInfo {
-                    kind: kind.to_string(),
-                    hints,
-                    text,
-                    hidden_input_kind,
-                    hidden_input_checked,
-                },
-            );
+        if let Some(bid) = idx_to_backend.get(&i).copied() {
+            map.insert(bid, cursor_info_from_json(elem));
         }
     }
 
     Ok(map)
+}
+
+/// Converts one `__abCursorInfo` result into the snapshot's cursor-interactive record.
+fn cursor_info_from_json(elem: &Value) -> CursorElementInfo {
+    // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
+    // 'focusable' for tabindex-only elements.
+    let has_cursor_pointer = elem
+        .get("hasCursorPointer")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let has_on_click = elem
+        .get("hasOnClick")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let has_tab_index = elem
+        .get("hasTabIndex")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let is_editable = elem
+        .get("isEditable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let kind = if has_cursor_pointer || has_on_click {
+        "clickable"
+    } else if is_editable {
+        "editable"
+    } else {
+        "focusable"
+    };
+
+    let mut hints: Vec<String> = Vec::new();
+    if has_cursor_pointer {
+        hints.push("cursor:pointer".to_string());
+    }
+    if has_on_click {
+        hints.push("onclick".to_string());
+    }
+    if has_tab_index {
+        hints.push("tabindex".to_string());
+    }
+    if is_editable {
+        hints.push("contenteditable".to_string());
+    }
+
+    let text = elem
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    let hidden_input_kind = elem
+        .get("hiddenInputType")
+        .and_then(|v| v.as_str())
+        .and_then(HiddenInputKind::parse);
+    let hidden_input_checked = elem
+        .get("hiddenInputChecked")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    CursorElementInfo {
+        kind: kind.to_string(),
+        hints,
+        text,
+        hidden_input_kind,
+        hidden_input_checked,
+    }
 }
 
 /// Promote LabelText/generic nodes that wrap a hidden radio/checkbox input.

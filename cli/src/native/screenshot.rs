@@ -159,6 +159,56 @@ pub async fn take_screenshot(
     })
 }
 
+/// Captures a viewport screenshot annotated with refs already collected for the visible elements.
+pub async fn take_viewport_annotated_screenshot(
+    client: &CdpClient,
+    session_id: &str,
+    ref_map: &RefMap,
+    options: &ScreenshotOptions,
+    iframe_sessions: &HashMap<String, String>,
+    refs: Vec<super::snapshot::ViewportRef>,
+) -> Result<ScreenshotResult, String> {
+    let raw_annotations = refs
+        .into_iter()
+        .map(|r| RawAnnotation {
+            number: r
+                .ref_id
+                .strip_prefix('e')
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0),
+            ref_id: r.ref_id,
+            role: r.role,
+            name: (!r.name.is_empty()).then_some(r.name),
+            rect: Rect {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            },
+        })
+        .collect();
+    let overlay_items = filter_annotations(raw_annotations, None);
+    let draw_items: Vec<&RawAnnotation> = overlay_items.iter().collect();
+    let overlay_injected = if !draw_items.is_empty() {
+        inject_annotation_overlay(client, session_id, &draw_items).await?;
+        true
+    } else {
+        false
+    };
+
+    let base64 =
+        capture_screenshot_base64(client, session_id, ref_map, options, iframe_sessions).await;
+
+    if overlay_injected {
+        let _ = remove_annotation_overlay(client, session_id).await;
+    }
+
+    Ok(ScreenshotResult {
+        base64: base64?,
+        annotations: project_annotations(&overlay_items, None, None),
+    })
+}
+
 async fn capture_screenshot_base64(
     client: &CdpClient,
     session_id: &str,
