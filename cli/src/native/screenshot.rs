@@ -121,8 +121,14 @@ pub async fn take_screenshot(
     };
 
     let overlay_items = filter_annotations(raw_annotations, target_rect.as_ref());
-    let overlay_injected = if options.annotate && !overlay_items.is_empty() {
-        inject_annotation_overlay(client, session_id, &overlay_items).await?;
+    let viewport = if options.annotate && !options.full_page && options.selector.is_none() {
+        get_viewport_rect(client, session_id).await?
+    } else {
+        None
+    };
+    let visible_items = visible_annotations(&overlay_items, viewport.as_ref());
+    let overlay_injected = if options.annotate && !visible_items.is_empty() {
+        inject_annotation_overlay(client, session_id, &visible_items).await?;
         true
     } else {
         false
@@ -375,6 +381,46 @@ fn filter_annotations(
     items
 }
 
+/// Returns the annotations whose boxes can appear in the captured image; all of them when no viewport bound applies.
+fn visible_annotations<'a>(
+    annotations: &'a [RawAnnotation],
+    viewport: Option<&Rect>,
+) -> Vec<&'a RawAnnotation> {
+    annotations
+        .iter()
+        .filter(|annotation| viewport.is_none_or(|view| overlaps(&annotation.rect, view)))
+        .collect()
+}
+
+/// Reads the visual viewport in CSS pixels, padded by the overlay label height so labels drawn above a box stay visible.
+async fn get_viewport_rect(client: &CdpClient, session_id: &str) -> Result<Option<Rect>, String> {
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: "({w: window.innerWidth || 0, h: window.innerHeight || 0})".to_string(),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await?;
+    let value = result.result.value.unwrap_or(Value::Null);
+    let width = value.get("w").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let height = value.get("h").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    if width <= 0.0 || height <= 0.0 {
+        return Ok(None);
+    }
+    Ok(Some(Rect {
+        x: -OVERLAY_LABEL_MARGIN,
+        y: -OVERLAY_LABEL_MARGIN,
+        width: width + 2.0 * OVERLAY_LABEL_MARGIN,
+        height: height + 2.0 * OVERLAY_LABEL_MARGIN,
+    }))
+}
+
+const OVERLAY_LABEL_MARGIN: f64 = 64.0;
+
 fn overlaps(left: &Rect, right: &Rect) -> bool {
     let left_x2 = left.x + left.width;
     let left_y2 = left.y + left.height;
@@ -387,7 +433,7 @@ fn overlaps(left: &Rect, right: &Rect) -> bool {
 async fn inject_annotation_overlay(
     client: &CdpClient,
     session_id: &str,
-    annotations: &[RawAnnotation],
+    annotations: &[&RawAnnotation],
 ) -> Result<(), String> {
     let overlay_data = annotations
         .iter()
