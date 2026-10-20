@@ -6,7 +6,7 @@ use super::cdp::client::CdpClient;
 use super::cdp::types::{
     AXNode, AXProperty, AXValue, EvaluateParams, EvaluateResult, GetFullAXTreeResult,
 };
-use super::element::{resolve_ax_session, RefMap};
+use super::element::{resolve_ax_session, RefEntry, RefMap};
 
 #[cfg(test)]
 mod document_identity_regressions {
@@ -757,9 +757,13 @@ pub struct ViewportRef {
 
 const VIEWPORT_OBJECT_GROUP: &str = "agent-browser-viewport";
 
+/// Elements that can carry a ref without cursor-interactive styling: the implicit and explicit roles in
+/// `INTERACTIVE_ROLES` and `CONTENT_ROLES`.
+const VIEWPORT_CANDIDATES: &str = "a,area,button,input,select,textarea,option,iframe,h1,h2,h3,h4,h5,h6,td,th,li,article,section,main,nav,[role],[tabindex],[contenteditable]";
+
 /// Assigns refs to the elements that intersect the viewport, asking Chrome for accessibility data on those
 /// elements only, so the cost tracks what is on screen rather than the size of the page.
-/// Existing refs are kept, so refs from an earlier full snapshot stay valid.
+/// Refs from an earlier snapshot of the same document are kept; a new document starts a fresh ref map.
 pub async fn take_viewport_refs(
     client: &CdpClient,
     session_id: &str,
@@ -771,7 +775,6 @@ pub async fn take_viewport_refs(
     client
         .send_command_no_params("Accessibility.enable", Some(session_id))
         .await?;
-
     let frame_tree = client
         .send_command_no_params("Page.getFrameTree", Some(session_id))
         .await
@@ -779,118 +782,13 @@ pub async fn take_viewport_refs(
     let loader = frame_tree
         .as_ref()
         .and_then(|tree| frame_loader(&tree["frameTree"], None));
+    let same_document = ref_map.is_current_document(session_id, None, session_id, loader);
     let document_is_known = ref_map.observe_document(session_id, None, session_id, loader);
-    if !document_is_known {
+    if !same_document {
         ref_map.begin_snapshot();
     }
 
-    let scan = format!(
-        r#"
-(function() {{
-    {CURSOR_INFO_JS}
-    var W = window.innerWidth || 0, H = window.innerHeight || 0;
-    var els = [], info = [];
-    function visit(root, inShadow) {{
-        var all = root.querySelectorAll('*');
-        for (var i = 0; i < all.length; i++) {{
-            var el = all[i];
-            var r = el.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < W && r.top < H) {{
-                var inBody = !inShadow && document.body && document.body.contains(el) && el !== document.body;
-                els.push(el);
-                info.push({{ x: r.x, y: r.y, width: r.width, height: r.height, cursor: inBody ? __abCursorInfo(el) : null }});
-            }}
-            if (el.shadowRoot) visit(el.shadowRoot, true);
-        }}
-    }}
-    visit(document, false);
-    window.__agentBrowserViewportElements = els;
-    return info;
-}})()
-"#
-    );
-    let scanned: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: scan,
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await?;
-    if let Some(exception) = scanned.exception_details {
-        return Err(format!("Viewport scan failed: {}", exception.text));
-    }
-    let info: Vec<Value> = scanned
-        .result
-        .value
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-
-    let handles = client
-        .send_command(
-            "Runtime.evaluate",
-            Some(serde_json::json!({
-                "expression": "(function(){ var e = window.__agentBrowserViewportElements || []; delete window.__agentBrowserViewportElements; return e; })()",
-                "returnByValue": false,
-                "objectGroup": VIEWPORT_OBJECT_GROUP,
-            })),
-            Some(session_id),
-        )
-        .await?;
-    let array_id = handles
-        .get("result")
-        .and_then(|r| r.get("objectId"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let mut element_ids: Vec<Option<String>> = vec![None; info.len()];
-    if let Some(array_id) = array_id.as_deref() {
-        let props = client
-            .send_command(
-                "Runtime.getProperties",
-                Some(serde_json::json!({ "objectId": array_id, "ownProperties": true })),
-                Some(session_id),
-            )
-            .await?;
-        for prop in props
-            .get("result")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-        {
-            let index = prop
-                .get("name")
-                .and_then(|v| v.as_str())
-                .and_then(|n| n.parse::<usize>().ok());
-            let object_id = prop
-                .get("value")
-                .and_then(|v| v.get("objectId"))
-                .and_then(|v| v.as_str());
-            if let (Some(index), Some(object_id)) = (index, object_id) {
-                if index < element_ids.len() {
-                    element_ids[index] = Some(object_id.to_string());
-                }
-            }
-        }
-    }
-
-    let ax_futures = element_ids.iter().map(|object_id| async move {
-        let object_id = object_id.as_deref()?;
-        let result: GetFullAXTreeResult = client
-            .send_command_typed(
-                "Accessibility.getPartialAXTree",
-                &serde_json::json!({ "objectId": object_id, "fetchRelatives": false }),
-                Some(session_id),
-            )
-            .await
-            .ok()?;
-        result.nodes.into_iter().next()
-    });
-    let ax_nodes = futures_util::future::join_all(ax_futures).await;
-
+    let scanned = collect_viewport_nodes(client, session_id).await;
     let _ = client
         .send_command(
             "Runtime.releaseObjectGroup",
@@ -898,29 +796,13 @@ pub async fn take_viewport_refs(
             Some(session_id),
         )
         .await;
+    let (nodes, rects, cursor_elements) = scanned?;
 
-    let mut nodes: Vec<AXNode> = Vec::new();
-    let mut scan_index: Vec<usize> = Vec::new();
-    let mut cursor_elements: HashMap<i64, CursorElementInfo> = HashMap::new();
-    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    for (i, node) in ax_nodes.into_iter().enumerate() {
-        let Some(mut node) = node else {
-            continue;
-        };
-        let Some(bid) = node.backend_d_o_m_node_id else {
-            continue;
-        };
-        if !seen.insert(bid) {
-            continue;
-        }
-        if let Some(cursor) = info[i].get("cursor").filter(|c| c.is_object()) {
-            cursor_elements.insert(bid, cursor_info_from_json(cursor));
-        }
-        node.child_ids = None;
-        nodes.push(node);
-        scan_index.push(i);
-    }
-
+    let prior: HashMap<String, RefEntry> = nodes
+        .iter()
+        .filter_map(|n| ref_map.durable_ref(session_id, None, n.backend_d_o_m_node_id?))
+        .filter_map(|id| Some((id.to_string(), ref_map.get(id)?.clone())))
+        .collect();
     let (mut tree_nodes, _) = build_tree(&nodes);
     promote_hidden_inputs(&mut tree_nodes, &cursor_elements);
     let ref_indices = assign_refs(
@@ -932,23 +814,146 @@ pub async fn take_viewport_refs(
         document_is_known,
     );
 
-    let number = |value: &Value, key: &str| value.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0);
-    Ok(ref_indices
+    let mut refs = Vec::with_capacity(ref_indices.len());
+    for idx in ref_indices {
+        let node = &tree_nodes[idx];
+        let Some(ref_id) = node.ref_id.clone() else {
+            continue;
+        };
+        match prior.get(&ref_id) {
+            Some(entry) if entry.role == node.role && entry.name == node.name => {
+                ref_map.restore(ref_id.clone(), entry.clone())
+            }
+            _ => ref_map.restrict_to_backend_node(&ref_id),
+        }
+        let [x, y, width, height] = rects[idx];
+        refs.push(ViewportRef {
+            ref_id,
+            role: node.role.clone(),
+            name: node.name.clone(),
+            x,
+            y,
+            width,
+            height,
+        });
+    }
+    Ok(refs)
+}
+
+type ViewportNodes = (Vec<AXNode>, Vec<[f64; 4]>, HashMap<i64, CursorElementInfo>);
+
+/// Finds candidate elements that intersect the viewport in one script and fetches each one's accessibility node.
+async fn collect_viewport_nodes(
+    client: &CdpClient,
+    session_id: &str,
+) -> Result<ViewportNodes, String> {
+    let scan = format!(
+        r#"
+(function() {{
+    {CURSOR_INFO_JS}
+    var W = window.innerWidth || 0, H = window.innerHeight || 0, sel = {sel};
+    var els = [], info = [];
+    function visit(root, inShadow) {{
+        var all = root.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {{
+            var el = all[i];
+            if (el.shadowRoot) visit(el.shadowRoot, true);
+            var r = el.getBoundingClientRect();
+            if (!(r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < W && r.top < H)) continue;
+            var cursor = !inShadow && el !== document.body && document.body && document.body.contains(el) ? __abCursorInfo(el) : null;
+            if (!cursor && !el.matches(sel)) continue;
+            els.push(el);
+            info.push({{ rect: [r.x, r.y, r.width, r.height], cursor: cursor }});
+        }}
+    }}
+    visit(document, false);
+    els.info = info;
+    return els;
+}})()
+"#,
+        sel = serde_json::to_string(VIEWPORT_CANDIDATES).unwrap_or_default(),
+    );
+    let array = client
+        .send_command(
+            "Runtime.evaluate",
+            Some(serde_json::json!({ "expression": scan, "objectGroup": VIEWPORT_OBJECT_GROUP })),
+            Some(session_id),
+        )
+        .await?;
+    if let Some(exception) = array.get("exceptionDetails") {
+        return Err(format!("Viewport scan failed: {}", exception["text"]));
+    }
+    let array_id = array["result"]["objectId"]
+        .as_str()
+        .ok_or("Viewport scan returned no element list")?;
+    let info = client
+        .send_command(
+            "Runtime.callFunctionOn",
+            Some(serde_json::json!({
+                "objectId": array_id,
+                "functionDeclaration": "function() { return this.info; }",
+                "returnByValue": true,
+            })),
+            Some(session_id),
+        )
+        .await?;
+    let info = info["result"]["value"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let props = client
+        .send_command(
+            "Runtime.getProperties",
+            Some(serde_json::json!({ "objectId": array_id, "ownProperties": true })),
+            Some(session_id),
+        )
+        .await?;
+    let mut element_ids: Vec<Option<String>> = vec![None; info.len()];
+    for prop in props["result"].as_array().into_iter().flatten() {
+        if let (Some(i), Some(id)) = (
+            prop["name"].as_str().and_then(|n| n.parse::<usize>().ok()),
+            prop["value"]["objectId"].as_str(),
+        ) {
+            if let Some(slot) = element_ids.get_mut(i) {
+                *slot = Some(id.to_string());
+            }
+        }
+    }
+
+    let ax_nodes = futures_util::future::join_all(element_ids.iter().map(|id| async move {
+        let result: GetFullAXTreeResult = client
+            .send_command_typed(
+                "Accessibility.getPartialAXTree",
+                &serde_json::json!({ "objectId": id.as_deref()?, "fetchRelatives": false }),
+                Some(session_id),
+            )
+            .await
+            .ok()?;
+        result.nodes.into_iter().next()
+    }))
+    .await;
+
+    let mut nodes = Vec::new();
+    let mut rects = Vec::new();
+    let mut cursor_elements = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for (mut node, item) in ax_nodes
         .into_iter()
-        .filter_map(|idx| {
-            let node = &tree_nodes[idx];
-            let rect = &info[scan_index[idx]];
-            Some(ViewportRef {
-                ref_id: node.ref_id.clone()?,
-                role: node.role.clone(),
-                name: node.name.clone(),
-                x: number(rect, "x"),
-                y: number(rect, "y"),
-                width: number(rect, "width"),
-                height: number(rect, "height"),
-            })
-        })
-        .collect())
+        .zip(&info)
+        .filter_map(|(n, i)| Some((n?, i)))
+    {
+        let Some(bid) = node.backend_d_o_m_node_id.filter(|bid| seen.insert(*bid)) else {
+            continue;
+        };
+        if item["cursor"].is_object() {
+            cursor_elements.insert(bid, cursor_info_from_json(&item["cursor"]));
+        }
+        let rect = |k: usize| item["rect"][k].as_f64().unwrap_or(0.0);
+        rects.push([rect(0), rect(1), rect(2), rect(3)]);
+        node.child_ids = None;
+        nodes.push(node);
+    }
+    Ok((nodes, rects, cursor_elements))
 }
 
 /// Resolve the child frame ID for an iframe element given its backendNodeId.
