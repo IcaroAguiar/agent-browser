@@ -226,6 +226,7 @@ async fn capture_screenshot_base64(
         clip: None,
         from_surface: Some(true),
         capture_beyond_viewport: if options.full_page { Some(true) } else { None },
+        optimize_for_speed: None,
     };
 
     if options.full_page {
@@ -247,6 +248,9 @@ async fn capture_screenshot_base64(
                 height,
                 scale: 1.0,
             });
+            if options.format == "png" && width * height > FAST_PNG_MIN_PIXELS {
+                params.optimize_for_speed = Some(true);
+            }
         }
     } else if let Some(ref selector) = options.selector {
         if let Some(rect) =
@@ -470,6 +474,9 @@ async fn get_viewport_rect(client: &CdpClient, session_id: &str) -> Result<Optio
 }
 
 const OVERLAY_LABEL_MARGIN: f64 = 64.0;
+
+/// Full-page PNGs larger than this many CSS pixels use Chrome's faster lossless encoder; smaller ones keep the compact default.
+const FAST_PNG_MIN_PIXELS: f64 = 16_000_000.0;
 
 fn overlaps(left: &Rect, right: &Rect) -> bool {
     let left_x2 = left.x + left.width;
