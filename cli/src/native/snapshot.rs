@@ -831,76 +831,120 @@ async fn collect_viewport_nodes(
 ) -> Result<ViewportNodes, String> {
     let scan = format!(
         r#"
-(function() {{
+function(sel, inShadowRoot, everyElement) {{
     {CURSOR_INFO_JS}
-    var W = window.innerWidth || 0, H = window.innerHeight || 0, sel = {sel};
+    var W = window.innerWidth || 0, H = window.innerHeight || 0;
     if (!W || !H) return null;
-    var els = [], info = [];
+    var els = [], info = [], hosts = [];
     function visit(root, inShadow) {{
         var all = root.querySelectorAll('*');
         for (var i = 0; i < all.length; i++) {{
             var el = all[i];
             if (el.shadowRoot) visit(el.shadowRoot, true);
             var r = el.getBoundingClientRect();
-            if (!(r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < W && r.top < H)) continue;
+            var visible = r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < W && r.top < H;
+            var custom = el.localName.indexOf('-') > 0 && (visible || (!r.width && !r.height));
+            var builtIn = visible && (/^(date|time|datetime-local|month|week)$/.test(el.type) && el.localName === 'input' || (el.localName === 'video' || el.localName === 'audio') && el.controls);
+            if (!el.shadowRoot && hosts.length < 500 && (custom || builtIn)) hosts.push(el);
+            if (!visible) continue;
             var cursor = !inShadow && el !== document.body && document.body && document.body.contains(el) ? __abCursorInfo(el) : null;
-            if (!cursor && !el.matches(sel)) continue;
+            if (!cursor && !everyElement && !el.matches(sel)) continue;
             els.push(el);
             info.push({{ rect: [r.x, r.y, r.width, r.height], cursor: cursor }});
         }}
     }}
-    visit(document, false);
+    visit(this, inShadowRoot || everyElement);
     els.info = info;
+    els.hosts = hosts;
     return els;
-}})()
-"#,
-        sel = serde_json::to_string(VIEWPORT_CANDIDATES).unwrap_or_default(),
+}}
+"#
     );
-    let array = client
-        .send_command(
-            "Runtime.evaluate",
-            Some(serde_json::json!({ "expression": scan, "objectGroup": VIEWPORT_OBJECT_GROUP })),
-            Some(session_id),
-        )
-        .await?;
-    if let Some(exception) = array.get("exceptionDetails") {
-        return Err(format!("Viewport scan failed: {}", exception["text"]));
-    }
-    let array_id = array["result"]["objectId"]
-        .as_str()
-        .ok_or("Viewport scan returned no element list")?;
-    let info = client
-        .send_command(
+    let call = |object_id: String, function: &str, args: Value, by_value: bool| {
+        client.send_command(
             "Runtime.callFunctionOn",
             Some(serde_json::json!({
-                "objectId": array_id,
-                "functionDeclaration": "function() { return this.info; }",
-                "returnByValue": true,
+                "objectId": object_id,
+                "functionDeclaration": function,
+                "arguments": args,
+                "returnByValue": by_value,
+                "objectGroup": VIEWPORT_OBJECT_GROUP,
             })),
             Some(session_id),
         )
-        .await?;
-    let info = info["result"]["value"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let props = client
+    };
+    let document = client
         .send_command(
-            "Runtime.getProperties",
-            Some(serde_json::json!({ "objectId": array_id, "ownProperties": true })),
+            "Runtime.evaluate",
+            Some(serde_json::json!({ "expression": "document", "objectGroup": VIEWPORT_OBJECT_GROUP })),
             Some(session_id),
         )
         .await?;
-    let mut element_ids: Vec<Option<String>> = vec![None; info.len()];
-    for prop in props["result"].as_array().into_iter().flatten() {
-        if let (Some(i), Some(id)) = (
-            prop["name"].as_str().and_then(|n| n.parse::<usize>().ok()),
-            prop["value"]["objectId"].as_str(),
-        ) {
-            if let Some(slot) = element_ids.get_mut(i) {
-                *slot = Some(id.to_string());
+    let mut roots = vec![(
+        object_id(&document["result"]).ok_or("No document handle")?,
+        false,
+        false,
+    )];
+    let mut info = Vec::new();
+    let mut element_ids: Vec<Option<String>> = Vec::new();
+    for depth in 0..4 {
+        let mut closed_roots = Vec::new();
+        for (root, in_shadow, every_element) in roots {
+            let args = serde_json::json!([
+                { "value": VIEWPORT_CANDIDATES },
+                { "value": in_shadow },
+                { "value": every_element },
+            ]);
+            let array = call(root, &scan, args, false).await?;
+            if let Some(exception) = array.get("exceptionDetails") {
+                return Err(format!("Viewport scan failed: {}", exception["text"]));
+            }
+            let Some(array_id) = object_id(&array["result"]) else {
+                if depth == 0 {
+                    return Err("Viewport scan returned no element list".to_string());
+                }
+                continue;
+            };
+            let found = call(
+                array_id.clone(),
+                "function() { return this.info; }",
+                serde_json::json!([]),
+                true,
+            )
+            .await?;
+            let found = found["result"]["value"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let mut ids = array_object_ids(client, session_id, &array_id).await?;
+            ids.resize(found.len(), None);
+            element_ids.extend(ids);
+            info.extend(found);
+            let hosts = call(
+                array_id,
+                "function() { return this.hosts; }",
+                serde_json::json!([]),
+                false,
+            )
+            .await?;
+            let Some(hosts_id) = object_id(&hosts["result"]) else {
+                continue;
+            };
+            for host in array_object_ids(client, session_id, &hosts_id)
+                .await?
+                .into_iter()
+                .flatten()
+            {
+                closed_roots.extend(closed_shadow_roots(client, session_id, &host).await);
             }
         }
+        if closed_roots.is_empty() {
+            break;
+        }
+        roots = closed_roots
+            .into_iter()
+            .map(|(root, user_agent)| (root, true, user_agent))
+            .collect();
     }
 
     let ax_nodes = futures_util::future::join_all(element_ids.iter().map(|id| async move {
@@ -940,6 +984,79 @@ async fn collect_viewport_nodes(
         return Err("Accessibility data is unavailable for the viewport elements".to_string());
     }
     Ok((nodes, rects, cursor_elements))
+}
+
+fn object_id(remote: &Value) -> Option<String> {
+    remote["objectId"].as_str().map(str::to_string)
+}
+
+/// Returns the element handles of a remote array, indexed by position.
+async fn array_object_ids(
+    client: &CdpClient,
+    session_id: &str,
+    array_id: &str,
+) -> Result<Vec<Option<String>>, String> {
+    let props = client
+        .send_command(
+            "Runtime.getProperties",
+            Some(serde_json::json!({ "objectId": array_id, "ownProperties": true })),
+            Some(session_id),
+        )
+        .await?;
+    let mut ids = Vec::new();
+    for prop in props["result"].as_array().into_iter().flatten() {
+        if let Some(i) = prop["name"].as_str().and_then(|n| n.parse::<usize>().ok()) {
+            if ids.len() <= i {
+                ids.resize(i + 1, None);
+            }
+            ids[i] = object_id(&prop["value"]);
+        }
+    }
+    Ok(ids)
+}
+
+/// Resolves the closed and browser-internal shadow roots of one host, which page scripts cannot reach.
+/// Each root comes with whether it is a user-agent root, whose controls get their roles from the browser.
+async fn closed_shadow_roots(
+    client: &CdpClient,
+    session_id: &str,
+    host: &str,
+) -> Vec<(String, bool)> {
+    let Ok(described) = client
+        .send_command(
+            "DOM.describeNode",
+            Some(serde_json::json!({ "objectId": host, "depth": 1, "pierce": true })),
+            Some(session_id),
+        )
+        .await
+    else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    for root in described["node"]["shadowRoots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let user_agent = root["shadowRootType"] == "user-agent";
+        if root["shadowRootType"] != "closed" && !user_agent {
+            continue;
+        }
+        if let Ok(resolved) = client
+            .send_command(
+                "DOM.resolveNode",
+                Some(serde_json::json!({
+                    "backendNodeId": root["backendNodeId"],
+                    "objectGroup": VIEWPORT_OBJECT_GROUP,
+                })),
+                Some(session_id),
+            )
+            .await
+        {
+            roots.extend(object_id(&resolved["object"]).map(|id| (id, user_agent)));
+        }
+    }
+    roots
 }
 
 /// Resolve the child frame ID for an iframe element given its backendNodeId.
