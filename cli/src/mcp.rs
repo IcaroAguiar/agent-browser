@@ -935,7 +935,7 @@ fn tools() -> Vec<Value> {
                 "path": { "type": "string", "description": "Optional output path." },
                 "selector": { "type": "string", "description": "Optional @ref or CSS selector to capture." },
                 "fullPage": { "type": "boolean", "default": false },
-                "annotate": { "type": "boolean", "default": false, "description": "Number visible elements in the screenshot." },
+                "annotate": { "type": "boolean", "default": false, "description": "Number the interactive elements visible in the screenshot. With fullPage, numbers every element on the page." },
                 "format": { "type": "string", "enum": ["png", "jpeg"], "description": "Screenshot format." },
                 "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "JPEG quality." },
                 "screenshotDir": { "type": "string", "description": "Default output directory when path is omitted." },

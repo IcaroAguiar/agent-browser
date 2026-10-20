@@ -6045,6 +6045,106 @@ async fn e2e_screenshot_annotate_many_elements() {
     assert_success(&resp);
 }
 
+/// Verifies that a viewport `screenshot --annotate` labels only visible elements,
+/// stays fast on a page with thousands of off-screen elements, and keeps the refs
+/// from an earlier snapshot so off-screen refs still resolve (#509).
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_viewport_only() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let mut html = String::from("<html><body style=\"margin:0\">");
+    for i in 1..=5000 {
+        html.push_str(&format!(
+            "<div style=\"height:40px\"><button id=\"b{i}\">Button {i}</button></div>"
+        ));
+    }
+    html.push_str("</body></html>");
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "setcontent", "html": html }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let refs = get_data(&resp)["refs"].clone();
+    let ref_for = |name: &str| {
+        refs.as_object()
+            .and_then(|m| {
+                m.iter()
+                    .find(|(_, v)| v.get("name").and_then(|n| n.as_str()) == Some(name))
+            })
+            .map(|(k, _)| k.clone())
+            .unwrap_or_else(|| panic!("no ref for {name} in snapshot"))
+    };
+    let visible_ref = ref_for("Button 3");
+    let offscreen_ref = ref_for("Button 4999");
+
+    let start = std::time::Instant::now();
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "screenshot", "annotate": true }),
+        &mut state,
+    )
+    .await;
+    let elapsed = start.elapsed();
+    assert_success(&resp);
+    let annotations = get_data(&resp)["annotations"]
+        .as_array()
+        .expect("Annotated screenshot should return annotations")
+        .clone();
+    assert!(
+        !annotations.is_empty() && annotations.len() < 100,
+        "expected only visible buttons, got {}",
+        annotations.len()
+    );
+    for ann in &annotations {
+        let y = ann["box"]["y"].as_f64().unwrap();
+        let h = ann["box"]["height"].as_f64().unwrap();
+        assert!(y + h > 0.0 && y < 2000.0, "annotation outside viewport: {ann}");
+    }
+    let button3 = annotations
+        .iter()
+        .find(|ann| ann.get("name").and_then(|v| v.as_str()) == Some("Button 3"))
+        .expect("Button 3 should be annotated");
+    assert_eq!(button3["ref"].as_str(), Some(visible_ref.as_str()));
+    assert!(
+        elapsed.as_secs() < 5,
+        "viewport annotate took {elapsed:?} on a 5000-button page"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "click", "selector": format!("@{offscreen_ref}") }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "screenshot", "annotate": true, "fullPage": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let full = get_data(&resp)["annotations"].as_array().unwrap().len();
+    assert!(full >= 5000, "full-page annotate should label every button, got {full}");
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 /// Verifies `snapshot` with many cursor-interactive elements completes in
 /// bounded time. Direct regression test for Issue #841's root cause: N×2
 /// sequential CDP round-trips per cursor-interactive element.

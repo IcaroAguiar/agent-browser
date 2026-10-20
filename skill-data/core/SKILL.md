@@ -324,7 +324,7 @@ Prefer `--if-changed` for repeated captures: skipping unchanged images is the mo
 
 Headless Chromium screenshots hide native scrollbars for consistent image output. Pass `--hide-scrollbars false` when launching to keep native scrollbars visible.
 
-`--annotate` is designed for multimodal models: each label `[N]` maps to ref `@eN`.
+`--annotate` is designed for multimodal models: each label `[N]` maps to ref `@eN`. Viewport screenshots label only the elements visible in the image; add `--full` to label the whole page. Elements that already have a ref from a `snapshot` keep the same `@eN`.
 
 ### Handle multiple pages via tabs
 

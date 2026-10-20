@@ -2179,6 +2179,8 @@ Options:
   --annotate           Overlay numbered labels on interactive elements.
                        Each label [N] corresponds to ref @eN from snapshot.
                        Prints a legend mapping labels to element roles/names.
+                       Labels only elements visible in the image; with --full,
+                       every element on the page is labeled.
                        With --json, annotations are included in the response.
                        Supported on Chromium and Lightpanda.
   --screenshot-dir <path>  Default output directory for screenshots

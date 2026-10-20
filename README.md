@@ -1013,6 +1013,8 @@ agent-browser snapshot --delta --full      # Force full state and refresh the ba
 
 The `--annotate` flag overlays numbered labels on interactive elements in the screenshot. Each label `[N]` corresponds to ref `@eN`, so the same refs work for both visual and text-based workflows.
 
+A viewport screenshot labels only the elements visible in the image, so it stays fast on very large pages. With `--full`, every element on the page is labeled. Elements that already have a ref from an earlier `snapshot` keep the same `@eN`.
+
 Annotated screenshots are supported on the CDP-backed browser path (Chrome/Lightpanda). The Safari/WebDriver backend does not yet support `--annotate`.
 
 ```bash
