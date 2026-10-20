@@ -5435,6 +5435,7 @@ async fn e2e_click_rejects_unreachable_elements() {
             <button id="gone" style="display:none" onclick="document.getElementById('result').textContent = 'gone'">Gone</button>
             <button id="hidden-attr" hidden onclick="document.getElementById('result').textContent = 'hidden'">Hidden</button>
             <button id="invisible" style="visibility:hidden" onclick="document.getElementById('result').textContent = 'invisible'">Invisible</button>
+            <button id="collapsed" style="visibility:collapse" onclick="document.getElementById('result').textContent = 'collapsed'">Collapsed</button>
             <button id="off-page" style="position:absolute;left:-9999px" onclick="document.getElementById('result').textContent = 'off'">Off page</button>
             <button id="disabled-btn" disabled onclick="document.getElementById('result').textContent = 'disabled'">Disabled</button>
             <fieldset disabled>
@@ -5458,6 +5459,7 @@ async fn e2e_click_rejects_unreachable_elements() {
         ("#gone", "is not visible"),
         ("#hidden-attr", "is not visible"),
         ("#invisible", "is not visible"),
+        ("#collapsed", "is not visible"),
         ("#off-page", "is outside the viewport"),
         ("#disabled-btn", "is disabled"),
         ("#fieldset-disabled", "is disabled"),

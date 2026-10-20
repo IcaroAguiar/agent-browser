@@ -985,7 +985,7 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
 const ACTIONABILITY_JS: &str = r#"(doc, el, x, y) => {
     try {
         const rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0 || el.ownerDocument.defaultView.getComputedStyle(el).visibility === 'hidden') return 'not visible';
+        if (rect.width <= 0 || rect.height <= 0 || ['hidden', 'collapse'].includes(el.ownerDocument.defaultView.getComputedStyle(el).visibility)) return 'not visible';
         if (el.disabled || el.matches(':disabled')) return 'disabled';
         const view = doc.defaultView;
         const outside = x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight;

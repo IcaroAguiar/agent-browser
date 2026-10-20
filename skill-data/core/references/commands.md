@@ -80,7 +80,7 @@ agent-browser upload @e1 file.pdf # Upload files
 
 Visible-label matching treats non-breaking and ordinary spaces equivalently.
 
-Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click also fails, instead of reporting success, when the element is hidden, disabled, or outside the viewport.
+Clicks fail before dispatch when another element covers the target's click point. The error names the covering element, for example `covered by <div#consent-banner>`. Dismiss or interact with that element, run a fresh snapshot, then retry the original action. Click and dblclick fail, instead of reporting success, when the element is hidden, disabled, or outside the viewport. `click --new-tab` opens the link's URL directly, so these checks do not apply to it.
 
 ## Get Information
 
