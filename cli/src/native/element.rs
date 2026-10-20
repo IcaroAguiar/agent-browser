@@ -329,6 +329,7 @@ async fn resolve_center_in_same_process_frame(
     session_id: &str,
     frame_id: &str,
     selector: &str,
+    require_actionable: bool,
 ) -> Result<(f64, f64), String> {
     let owner_object_id = frame_owner_object_id(client, session_id, frame_id).await?;
     let find_expr = build_find_element_js_in("doc", selector);
@@ -351,8 +352,9 @@ async fn resolve_center_in_same_process_frame(
                 win = win.parent;
             }}
             const blockerAt = {BLOCKER_AT_JS};
+            const notActionable = {ACTIONABILITY_JS};
             const topDoc = win ? win.document : doc;
-            return {{ x: x, y: y, blocker: blockerAt(topDoc, el, x, y) }};
+            return {{ x: x, y: y, reason: notActionable(topDoc, el, x, y), blocker: blockerAt(topDoc, el, x, y) }};
         }}"#,
     );
     let result = client
@@ -367,6 +369,11 @@ async fn resolve_center_in_same_process_frame(
         )
         .await?;
     let value = result.get("result").and_then(|r| r.get("value"));
+    if require_actionable {
+        if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
+            return Err(not_actionable_error(selector, reason));
+        }
+    }
     if let Some(blocker) = value
         .and_then(|v| v.get("blocker"))
         .and_then(|v| v.as_str())
@@ -421,6 +428,7 @@ pub async fn resolve_element_center(
     ref_map: &RefMap,
     selector_or_ref: &str,
     iframe_sessions: &HashMap<String, String>,
+    require_actionable: bool,
 ) -> Result<(f64, f64, String), String> {
     if let Some(ref_id) = parse_ref(selector_or_ref) {
         let entry = ref_map
@@ -454,6 +462,7 @@ pub async fn resolve_element_center(
                     selector_or_ref,
                     x,
                     y,
+                    require_actionable,
                 )
                 .await?;
                 return Ok((x, y, effective_session_id.to_string()));
@@ -495,6 +504,7 @@ pub async fn resolve_element_center(
             selector_or_ref,
             x,
             y,
+            require_actionable,
         )
         .await?;
         return Ok((x, y, effective_session_id.to_string()));
@@ -505,15 +515,23 @@ pub async fn resolve_element_center(
         // Cross-process iframe: its dedicated session's main frame IS the
         // iframe, so plain document-rooted resolution works there.
         if let Some(frame_session) = iframe_sessions.get(&frame_id) {
-            let (x, y) = resolve_by_selector(client, frame_session, selector_or_ref).await?;
+            let (x, y) =
+                resolve_by_selector(client, frame_session, selector_or_ref, require_actionable)
+                    .await?;
             return Ok((x, y, frame_session.clone()));
         }
-        let (x, y) =
-            resolve_center_in_same_process_frame(client, session_id, &frame_id, selector_or_ref)
-                .await?;
+        let (x, y) = resolve_center_in_same_process_frame(
+            client,
+            session_id,
+            &frame_id,
+            selector_or_ref,
+            require_actionable,
+        )
+        .await?;
         return Ok((x, y, session_id.to_string()));
     }
-    let (x, y) = resolve_by_selector(client, session_id, selector_or_ref).await?;
+    let (x, y) =
+        resolve_by_selector(client, session_id, selector_or_ref, require_actionable).await?;
     Ok((x, y, session_id.to_string()))
 }
 
@@ -598,6 +616,7 @@ async fn check_node_interception(
     target: &str,
     x: f64,
     y: f64,
+    require_actionable: bool,
 ) -> Result<(), String> {
     let resolved: Result<DomResolveNodeResult, String> = client
         .send_command_typed(
@@ -627,7 +646,8 @@ async fn check_node_interception(
                 topDoc = topDoc.defaultView.frameElement.ownerDocument;
             }}
             const blockerAt = {BLOCKER_AT_JS};
-            return blockerAt(topDoc, this, x, y);
+            const notActionable = {ACTIONABILITY_JS};
+            return {{ blocker: blockerAt(topDoc, this, x, y), reason: notActionable(topDoc, this, x, y) }};
         }}"#,
     );
     let result = client
@@ -643,9 +663,14 @@ async fn check_node_interception(
         )
         .await;
     if let Ok(value) = result {
+        let value = value.get("result").and_then(|r| r.get("value"));
+        if require_actionable {
+            if let Some(reason) = value.and_then(|v| v.get("reason")).and_then(|v| v.as_str()) {
+                return Err(not_actionable_error(target, reason));
+            }
+        }
         if let Some(blocker) = value
-            .get("result")
-            .and_then(|r| r.get("value"))
+            .and_then(|v| v.get("blocker"))
             .and_then(|v| v.as_str())
         {
             return Err(intercepted_error(target, blocker));
@@ -955,6 +980,20 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     return desc;
 }"#;
 
+/// Returns why a click at (x, y) cannot reach `el`, or null when it can.
+/// It fails open when the engine lacks an API it needs.
+const ACTIONABILITY_JS: &str = r#"(doc, el, x, y) => {
+    try {
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0 || el.ownerDocument.defaultView.getComputedStyle(el).visibility === 'hidden') return 'not visible';
+        if (el.disabled || el.matches(':disabled')) return 'disabled';
+        const view = doc.defaultView;
+        const outside = x < 0 || y < 0 || x >= view.innerWidth || y >= view.innerHeight;
+        if (outside && !doc.elementFromPoint(x, y)) return 'outside the viewport';
+    } catch (e) {}
+    return null;
+}"#;
+
 fn build_selector_js(selector: &str) -> String {
     let find_expr = build_find_element_js(selector);
     // Input events dispatch at viewport coordinates, so an element outside the
@@ -977,7 +1016,8 @@ fn build_selector_js(selector: &str) -> String {
             const x = rect.x + rect.width / 2;
             const y = rect.y + rect.height / 2;
             const blockerAt = {BLOCKER_AT_JS};
-            return {{ x: x, y: y, blocker: blockerAt(document, el, x, y) }};
+            const notActionable = {ACTIONABILITY_JS};
+            return {{ x: x, y: y, reason: notActionable(document, el, x, y), blocker: blockerAt(document, el, x, y) }};
         }})()"#,
     )
 }
@@ -986,6 +1026,7 @@ async fn resolve_by_selector(
     client: &CdpClient,
     session_id: &str,
     selector: &str,
+    require_actionable: bool,
 ) -> Result<(f64, f64), String> {
     let js = build_selector_js(selector);
 
@@ -1002,6 +1043,11 @@ async fn resolve_by_selector(
         .await?;
 
     let val = result.result.value.unwrap_or(Value::Null);
+    if require_actionable {
+        if let Some(reason) = val.get("reason").and_then(|v| v.as_str()) {
+            return Err(not_actionable_error(selector, reason));
+        }
+    }
     if let Some(blocker) = val.get("blocker").and_then(|v| v.as_str()) {
         return Err(intercepted_error(selector, blocker));
     }
@@ -1018,6 +1064,13 @@ fn intercepted_error(target: &str, blocker: &str) -> String {
     format!(
         "Element '{}' is covered by <{}> at its click point, so the input would land on that element instead. Dismiss or interact with the covering element first (it is often a dialog, banner, or sticky header).",
         target, blocker
+    )
+}
+
+fn not_actionable_error(target: &str, reason: &str) -> String {
+    format!(
+        "Element '{}' is {}, so the click would not reach it",
+        target, reason
     )
 }
 
@@ -1172,7 +1225,7 @@ pub async fn is_element_enabled(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return !this.disabled; }".to_string(),
+                function_declaration: "function() { return !this.disabled && !(this.matches && this.matches(':disabled')); }".to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),

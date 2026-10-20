@@ -1736,6 +1736,9 @@ XPath, or an element reference from snapshot (e.g., @e1).
 If another element covers the click point, agent-browser reports the
 covering element instead of dispatching a click to the wrong target.
 
+Click also fails, instead of reporting success, when the element is
+hidden, disabled, or outside the viewport.
+
 Options:
   --new-tab            Open link in a new tab instead of navigating current tab.
                        The new tab inherits session setup before its first load.

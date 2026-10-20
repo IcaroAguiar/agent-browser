@@ -6311,6 +6311,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.ref_map,
             selector,
             &state.iframe_sessions,
+            true,
         )
         .await?;
         let offset = super::element::session_viewport_offset(
@@ -10813,6 +10814,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.ref_map,
         source,
         &state.iframe_sessions,
+        false,
     )
     .await?;
     let (tx, ty, target_session_id) = super::element::resolve_element_center(
@@ -10821,6 +10823,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.ref_map,
         target,
         &state.iframe_sessions,
+        false,
     )
     .await?;
 
