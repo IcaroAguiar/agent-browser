@@ -6195,6 +6195,23 @@ async fn e2e_screenshot_annotate_viewport_only() {
         300,
         "full-page annotate should label every button"
     );
+    let rects = run(
+        &mut state,
+        json!({ "action": "evaluate", "script": "JSON.stringify(Object.fromEntries([...document.querySelectorAll('button')].map(b => { const r = b.getBoundingClientRect(); return [b.textContent, [r.x + scrollX, r.y + scrollY, r.width, r.height]]; })))" }),
+    )
+    .await;
+    let rects: std::collections::HashMap<String, Vec<f64>> =
+        serde_json::from_str(get_data(&rects)["result"].as_str().unwrap()).unwrap();
+    for ann in get_data(&resp)["annotations"].as_array().unwrap() {
+        let expected = &rects[ann["name"].as_str().unwrap()];
+        for (i, key) in ["x", "y", "width", "height"].iter().enumerate() {
+            let got = ann["box"][key].as_f64().unwrap();
+            assert!(
+                (got - expected[i]).abs() <= 1.0,
+                "{key} of {ann} differs from getBoundingClientRect {expected:?}"
+            );
+        }
+    }
 
     assert_success(&run(&mut state, json!({ "action": "close" })).await);
 }

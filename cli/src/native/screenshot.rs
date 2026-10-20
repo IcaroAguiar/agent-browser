@@ -263,14 +263,16 @@ async fn collect_annotations(
     let bounds = layout_bounds(client, session_id, with_backend_ids.len()).await;
     let mut annotations = Vec::new();
     let mut with_backend_ids = with_backend_ids;
-    with_backend_ids.retain(|(ref_id, entry, bid)| match bounds.get(bid) {
-        Some(rect) => {
-            if rect.width > 0.0 && rect.height > 0.0 {
-                annotations.push(raw_annotation(ref_id, entry, rect.clone()));
+    with_backend_ids.retain(|(ref_id, entry, bid)| {
+        match bounds.get(bid).filter(|_| entry.frame_id.is_none()) {
+            Some(rect) => {
+                if rect.width > 0.0 && rect.height > 0.0 {
+                    annotations.push(raw_annotation(ref_id, entry, rect.clone()));
+                }
+                false
             }
-            false
+            None => true,
         }
-        None => true,
     });
     if with_backend_ids.is_empty() {
         return Ok(annotations);
@@ -347,7 +349,7 @@ fn raw_annotation(ref_id: &str, entry: &super::element::RefEntry, rect: Rect) ->
 }
 
 /// Reads every main-document layout box in one `DOMSnapshot` call, keyed by backend node id, when that is cheaper
-/// than per-ref calls. Only boxes that match `getBoundingClientRect` exactly are returned: nodes under a transform,
+/// than per-ref calls. Only boxes that match `getBoundingClientRect` exactly are returned; nodes under a transform,
 /// inside SVG or skipped content, or with more than one layout object are left to the per-ref path.
 async fn layout_bounds(client: &CdpClient, session_id: &str, refs: usize) -> HashMap<i64, Rect> {
     if refs < LAYOUT_BOUNDS_MIN_REFS {
@@ -366,7 +368,7 @@ async fn layout_bounds(client: &CdpClient, session_id: &str, refs: usize) -> Has
         .send_command(
             "DOMSnapshot.captureSnapshot",
             Some(serde_json::json!({
-                "computedStyles": ["transform", "translate", "rotate", "scale", "content-visibility"]
+                "computedStyles": ["transform", "translate", "rotate", "scale", "offset-path", "content-visibility"]
             })),
             Some(session_id),
         )
@@ -419,26 +421,27 @@ async fn layout_bounds(client: &CdpClient, session_id: &str, refs: usize) -> Has
             .map(|s| s.iter().map(text).collect())
             .unwrap_or_default();
         let transformed = !style.is_empty()
-            && (style.len() != 5
-                || style[..4].iter().any(|v| *v != "none")
-                || !matches!(style[4], "visible" | ""));
+            && (style.len() != 6
+                || style[..5].iter().any(|v| *v != "none")
+                || !matches!(style[5], "visible" | ""));
         if layout_of[ni].is_some() || transformed {
             unsafe_node[ni] = true;
         }
         layout_of[ni] = Some(li);
     }
     for i in 0..backend.len() {
-        if let Some(p) = parents
-            .get(i)
-            .and_then(|&p| usize::try_from(p).ok())
-            .filter(|&p| p < i)
-        {
-            unsafe_node[i] |= unsafe_node[p];
+        match parents.get(i) {
+            Some(&p) if p < 0 => {}
+            Some(&p) if (p as usize) < i => unsafe_node[i] |= unsafe_node[p as usize],
+            _ => unsafe_node[i] = true,
         }
     }
 
-    let scroll_x = doc["scrollOffsetX"].as_f64().unwrap_or(0.0);
-    let scroll_y = doc["scrollOffsetY"].as_f64().unwrap_or(0.0);
+    let (Some(scroll_x), Some(scroll_y)) =
+        (doc["scrollOffsetX"].as_f64(), doc["scrollOffsetY"].as_f64())
+    else {
+        return HashMap::new();
+    };
     let mut map = HashMap::new();
     for (i, li) in layout_of.into_iter().enumerate() {
         let (Some(b), false) = (li.and_then(|li| bounds.get(li)), unsafe_node[i]) else {
