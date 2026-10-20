@@ -18,6 +18,8 @@ agent-browser close
 agent-browser --cdp 9222 snapshot
 ```
 
+If the debugging port is not open yet, `connect` and `--cdp` wait up to 2 seconds for it before failing.
+
 ## Remote WebSocket URLs
 
 Connect to remote browser services via WebSocket URL:
