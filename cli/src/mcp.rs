@@ -2163,10 +2163,57 @@ fn is_open_world_tool(name: &str) -> bool {
     )
 }
 
-fn is_known_tool(name: &str) -> bool {
+fn find_tool(name: &str) -> Option<Value> {
     tools()
-        .iter()
-        .any(|tool| tool.get("name").and_then(|v| v.as_str()) == Some(name))
+        .into_iter()
+        .find(|tool| tool.get("name").and_then(|v| v.as_str()) == Some(name))
+}
+
+/// Returns an error naming any argument keys the tool's input schema does not declare.
+fn reject_unknown_arguments(
+    name: &str,
+    definition: &Value,
+    arguments: &Value,
+) -> Result<(), ProtocolError> {
+    let Some(args) = arguments.as_object() else {
+        return Ok(());
+    };
+    let empty = serde_json::Map::new();
+    let declared = definition
+        .pointer("/inputSchema/properties")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&empty);
+    let mut unknown: Vec<&str> = args
+        .keys()
+        .filter(|key| !declared.contains_key(*key))
+        .map(|key| key.as_str())
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    unknown.sort();
+    let shared = tool("", "", "", json!({}), &[]);
+    let shared_keys = shared
+        .pointer("/inputSchema/properties")
+        .and_then(|v| v.as_object())
+        .unwrap_or(&empty);
+    let mut own: Vec<&str> = declared
+        .keys()
+        .filter(|key| !shared_keys.contains_key(*key))
+        .map(|key| key.as_str())
+        .collect();
+    own.sort();
+    let own = if own.is_empty() {
+        "none".to_string()
+    } else {
+        own.join(", ")
+    };
+    Err(ProtocolError::invalid_params(format!(
+        "Unknown argument(s) for {}: {}. Tool arguments: {}.",
+        name,
+        unknown.join(", "),
+        own
+    )))
 }
 
 fn wait_tool(
@@ -2198,12 +2245,12 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         .ok_or_else(|| ProtocolError::invalid_params("tools/call params.name must be a string"))?;
     let arguments = params.get("arguments").unwrap_or(&Value::Null);
 
-    if !is_known_tool(name) {
+    let Some(tool_def) = find_tool(name) else {
         return Err(ProtocolError::invalid_params(format!(
             "Unknown tool: {}",
             name
         )));
-    }
+    };
 
     if !config.allows(name) {
         return Err(ProtocolError::invalid_params(format!(
@@ -2212,6 +2259,8 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
             config.profile_names().join(", ")
         )));
     }
+
+    reject_unknown_arguments(name, &tool_def, arguments)?;
 
     match name {
         TOOL_TOOLS_PROFILES => call_tools_profiles(config),
@@ -4573,6 +4622,30 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, -32602);
         assert!(err.message.contains("not enabled"));
+    }
+
+    #[test]
+    fn call_tool_rejects_unknown_argument() {
+        let err = call_tool(
+            Some(&json!({
+                "name": TOOL_TAB_CLOSE,
+                "arguments": {"tabId": "t13"}
+            })),
+            &McpConfig::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("tabId"));
+        let listed = err.message.split("Tool arguments:").nth(1).unwrap();
+        assert!(listed.contains("tab"));
+        assert!(!listed.contains("session"));
+    }
+
+    #[test]
+    fn reject_unknown_arguments_accepts_declared_and_shared_keys() {
+        let definition = find_tool(TOOL_CLICK).unwrap();
+        let args = json!({"selector": "@e1", "session": "s", "timeoutMs": 5});
+        reject_unknown_arguments(TOOL_CLICK, &definition, &args).unwrap();
     }
 
     #[test]
