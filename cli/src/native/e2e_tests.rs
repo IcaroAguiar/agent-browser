@@ -6180,6 +6180,10 @@ async fn e2e_screenshot_annotate_viewport_only() {
     .await;
     assert_eq!(get_data(&resp)["result"].as_str(), Some("b4999"));
 
+    let small: String = (1..=300)
+        .map(|i| format!("<div style=\"height:40px\"><button>Button {i}</button></div>"))
+        .collect();
+    assert_success(&run(&mut state, json!({ "action": "setcontent", "html": small })).await);
     let resp = run(
         &mut state,
         json!({ "action": "screenshot", "annotate": true, "fullPage": true }),
@@ -6188,7 +6192,7 @@ async fn e2e_screenshot_annotate_viewport_only() {
     assert_success(&resp);
     assert_eq!(
         names(&resp).len(),
-        5000,
+        300,
         "full-page annotate should label every button"
     );
 

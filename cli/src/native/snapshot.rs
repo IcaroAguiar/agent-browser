@@ -744,7 +744,8 @@ const VIEWPORT_CANDIDATES: &str = "a,area,button,input,select,textarea,option,if
 
 /// Assigns refs to the elements that intersect the viewport, asking Chrome for accessibility data on those
 /// elements only, so the cost tracks what is on screen rather than the size of the page.
-/// Refs from an earlier snapshot of the same document are kept; a new document starts a fresh ref map.
+/// Refs from an earlier snapshot of the same document are kept. Errors on an empty viewport or missing accessibility
+/// data so the caller can fall back to the full snapshot.
 pub async fn take_viewport_refs(
     client: &CdpClient,
     session_id: &str,
@@ -833,6 +834,7 @@ async fn collect_viewport_nodes(
 (function() {{
     {CURSOR_INFO_JS}
     var W = window.innerWidth || 0, H = window.innerHeight || 0, sel = {sel};
+    if (!W || !H) return null;
     var els = [], info = [];
     function visit(root, inShadow) {{
         var all = root.querySelectorAll('*');
@@ -933,6 +935,9 @@ async fn collect_viewport_nodes(
         rects.push([rect(0), rect(1), rect(2), rect(3)]);
         node.child_ids = None;
         nodes.push(node);
+    }
+    if nodes.is_empty() && !info.is_empty() {
+        return Err("Accessibility data is unavailable for the viewport elements".to_string());
     }
     Ok((nodes, rects, cursor_elements))
 }

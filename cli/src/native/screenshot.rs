@@ -260,6 +260,22 @@ async fn collect_annotations(
         return Ok(Vec::new());
     }
 
+    let bounds = layout_bounds(client, session_id, with_backend_ids.len()).await;
+    let mut annotations = Vec::new();
+    let mut with_backend_ids = with_backend_ids;
+    with_backend_ids.retain(|(ref_id, entry, bid)| match bounds.get(bid) {
+        Some(rect) => {
+            if rect.width > 0.0 && rect.height > 0.0 {
+                annotations.push(raw_annotation(ref_id, entry, rect.clone()));
+            }
+            false
+        }
+        None => true,
+    });
+    if with_backend_ids.is_empty() {
+        return Ok(annotations);
+    }
+
     // Batch-resolve all backend_node_ids to object IDs using concurrent CDP calls.
     let resolve_futures: Vec<_> = with_backend_ids
         .iter()
@@ -293,7 +309,7 @@ async fn collect_annotations(
     }
 
     if resolved.is_empty() {
-        return Ok(Vec::new());
+        return Ok(annotations);
     }
 
     // Batch-get bounding rects for all resolved elements using concurrent CDP calls.
@@ -304,7 +320,6 @@ async fn collect_annotations(
 
     let rect_results = futures_util::future::join_all(rect_futures).await;
 
-    let mut annotations = Vec::new();
     for (i, rect_result) in rect_results.into_iter().enumerate() {
         let rect = match rect_result {
             Ok(Some(r)) if r.width > 0.0 && r.height > 0.0 => r,
@@ -312,21 +327,154 @@ async fn collect_annotations(
         };
 
         let (ref_id, entry, _) = &resolved[i];
-        let number = ref_id
-            .strip_prefix('e')
-            .and_then(|n| n.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        annotations.push(RawAnnotation {
-            ref_id: ref_id.clone(),
-            number,
-            role: entry.role.clone(),
-            name: (!entry.name.is_empty()).then_some(entry.name.clone()),
-            rect,
-        });
+        annotations.push(raw_annotation(ref_id, entry, rect));
     }
 
     Ok(annotations)
+}
+
+fn raw_annotation(ref_id: &str, entry: &super::element::RefEntry, rect: Rect) -> RawAnnotation {
+    RawAnnotation {
+        ref_id: ref_id.to_string(),
+        number: ref_id
+            .strip_prefix('e')
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0),
+        role: entry.role.clone(),
+        name: (!entry.name.is_empty()).then_some(entry.name.clone()),
+        rect,
+    }
+}
+
+/// Reads every main-document layout box in one `DOMSnapshot` call, keyed by backend node id, when that is cheaper
+/// than per-ref calls. Only boxes that match `getBoundingClientRect` exactly are returned: nodes under a transform,
+/// inside SVG or skipped content, or with more than one layout object are left to the per-ref path.
+async fn layout_bounds(client: &CdpClient, session_id: &str, refs: usize) -> HashMap<i64, Rect> {
+    if refs < LAYOUT_BOUNDS_MIN_REFS {
+        return HashMap::new();
+    }
+    let elements = get_number(
+        client,
+        session_id,
+        "document.getElementsByTagName('*').length",
+    )
+    .await;
+    if elements.is_none_or(|n| (refs as f64) * 4.0 < n) {
+        return HashMap::new();
+    }
+    let Ok(snap) = client
+        .send_command(
+            "DOMSnapshot.captureSnapshot",
+            Some(serde_json::json!({
+                "computedStyles": ["transform", "translate", "rotate", "scale", "content-visibility"]
+            })),
+            Some(session_id),
+        )
+        .await
+    else {
+        return HashMap::new();
+    };
+    let strings = snap["strings"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let text = |v: &Value| {
+        v.as_u64()
+            .and_then(|i| strings.get(i as usize))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
+    let doc = &snap["documents"][0];
+    let ints = |v: &Value| -> Vec<i64> {
+        v.as_array()
+            .map(|a| a.iter().map(|x| x.as_i64().unwrap_or(-1)).collect())
+            .unwrap_or_default()
+    };
+    let parents = ints(&doc["nodes"]["parentIndex"]);
+    let backend = ints(&doc["nodes"]["backendNodeId"]);
+    let names = doc["nodes"]["nodeName"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let layout_nodes = ints(&doc["layout"]["nodeIndex"]);
+    let bounds = doc["layout"]["bounds"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let styles = doc["layout"]["styles"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+
+    let mut layout_of: Vec<Option<usize>> = vec![None; backend.len()];
+    let mut unsafe_node: Vec<bool> = names
+        .iter()
+        .map(|n| text(n).eq_ignore_ascii_case("svg"))
+        .collect();
+    unsafe_node.resize(backend.len(), true);
+    for (li, &ni) in layout_nodes.iter().enumerate() {
+        let Some(ni) = usize::try_from(ni).ok().filter(|&i| i < backend.len()) else {
+            continue;
+        };
+        let style: Vec<&str> = styles
+            .get(li)
+            .and_then(Value::as_array)
+            .map(|s| s.iter().map(text).collect())
+            .unwrap_or_default();
+        let transformed = !style.is_empty()
+            && (style.len() != 5
+                || style[..4].iter().any(|v| *v != "none")
+                || !matches!(style[4], "visible" | ""));
+        if layout_of[ni].is_some() || transformed {
+            unsafe_node[ni] = true;
+        }
+        layout_of[ni] = Some(li);
+    }
+    for i in 0..backend.len() {
+        if let Some(p) = parents
+            .get(i)
+            .and_then(|&p| usize::try_from(p).ok())
+            .filter(|&p| p < i)
+        {
+            unsafe_node[i] |= unsafe_node[p];
+        }
+    }
+
+    let scroll_x = doc["scrollOffsetX"].as_f64().unwrap_or(0.0);
+    let scroll_y = doc["scrollOffsetY"].as_f64().unwrap_or(0.0);
+    let mut map = HashMap::new();
+    for (i, li) in layout_of.into_iter().enumerate() {
+        let (Some(b), false) = (li.and_then(|li| bounds.get(li)), unsafe_node[i]) else {
+            continue;
+        };
+        if let (Some(x), Some(y), Some(width), Some(height)) =
+            (b[0].as_f64(), b[1].as_f64(), b[2].as_f64(), b[3].as_f64())
+        {
+            map.insert(
+                backend[i],
+                Rect {
+                    x: x - scroll_x,
+                    y: y - scroll_y,
+                    width,
+                    height,
+                },
+            );
+        }
+    }
+    map
+}
+
+async fn get_number(client: &CdpClient, session_id: &str, expression: &str) -> Option<f64> {
+    let result: EvaluateResult = client
+        .send_command_typed(
+            "Runtime.evaluate",
+            &EvaluateParams {
+                expression: expression.to_string(),
+                return_by_value: Some(true),
+                await_promise: Some(false),
+            },
+            Some(session_id),
+        )
+        .await
+        .ok()?;
+    result.result.value.as_ref().and_then(Value::as_f64)
 }
 
 async fn get_rect_for_selector(
@@ -397,6 +545,9 @@ fn filter_annotations(
     items.sort_by_key(|annotation| annotation.number);
     items
 }
+
+/// Pages with fewer refs than this read boxes with per-ref calls, which are cheaper than a full layout snapshot.
+const LAYOUT_BOUNDS_MIN_REFS: usize = 256;
 
 /// Full-page PNGs larger than this many CSS pixels use Chrome's faster lossless encoder; smaller ones keep the compact default.
 const FAST_PNG_MIN_PIXELS: f64 = 16_000_000.0;

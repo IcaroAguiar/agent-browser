@@ -6146,11 +6146,13 @@ async fn handle_screenshot(cmd: &Value, state: &mut DaemonState) -> Result<Value
             && options.selector.is_none()
             && state.active_frame_id.is_none();
         let viewport_refs = if viewport_only {
-            Some(snapshot::take_viewport_refs(&mgr.client, &session_id, &mut state.ref_map).await?)
+            snapshot::take_viewport_refs(&mgr.client, &session_id, &mut state.ref_map)
+                .await
+                .ok()
         } else {
             None
         };
-        if annotate && !viewport_only {
+        if annotate && viewport_refs.is_none() {
             state.ref_map.begin_snapshot();
             let _ = snapshot::take_snapshot(
                 &mgr.client,
