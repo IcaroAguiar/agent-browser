@@ -14665,6 +14665,40 @@ mod tests {
     }
 
     #[test]
+    fn drain_keeps_discovered_page_when_its_session_detaches() {
+        let mut state = DaemonState::new();
+        let (events, receiver) = broadcast::channel(16);
+        state.event_rx = Some(receiver);
+
+        events
+            .send(CdpEvent {
+                method: "Target.targetInfoChanged".to_string(),
+                params: json!({"targetInfo":{"targetId":"p","type":"page","title":"","url":"https://example.com/","attached":false}}),
+                session_id: None,
+            })
+            .unwrap();
+        events
+            .send(CdpEvent {
+                method: "Target.attachedToTarget".to_string(),
+                params: json!({"sessionId":"old","targetInfo":{"targetId":"p","type":"page","title":"","url":"https://example.com/","attached":true},"waitingForDebugger":true}),
+                session_id: None,
+            })
+            .unwrap();
+        events
+            .send(CdpEvent {
+                method: "Target.detachedFromTarget".to_string(),
+                params: json!({"sessionId":"old","targetId":"p"}),
+                session_id: None,
+            })
+            .unwrap();
+
+        let drained = state.drain_cdp_events();
+        assert!(drained.attached_page_sessions.is_empty());
+        assert_eq!(drained.new_targets.len(), 1);
+        assert_eq!(drained.new_targets[0].target_info.target_id, "p");
+    }
+
+    #[test]
     fn test_restore_validation_is_deferred_after_launch() {
         assert!(!should_validate_restore_after_action("launch"));
         assert!(should_validate_restore_after_action("navigate"));
