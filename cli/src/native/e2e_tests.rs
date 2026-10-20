@@ -5443,6 +5443,7 @@ async fn e2e_click_rejects_unreachable_elements() {
             </fieldset>
             <button id="ok" onclick="document.getElementById('result').textContent = 'clicked'">Ok</button>
             <label><input id="hidden-check" type="checkbox" style="display:none"> Accept</label>
+            <svg width="300" height="100"><line id="flat-line" x1="20" y1="50" x2="280" y2="50" stroke="black" stroke-width="8" onclick="document.getElementById('result').textContent = 'line'"/></svg>
             <div id="result">idle</div>
         </body>
         </html>
@@ -5518,6 +5519,14 @@ async fn e2e_click_rejects_unreachable_elements() {
     .await;
     assert_success(&resp);
     assert_eq!(result_text(&mut state).await, "clicked");
+
+    let resp = execute_command(
+        &json!({ "id": "7b", "action": "click", "selector": "#flat-line" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(result_text(&mut state).await, "line");
 
     let resp = execute_command(
         &json!({ "id": "8", "action": "isenabled", "selector": "#fieldset-disabled" }),
