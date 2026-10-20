@@ -2714,6 +2714,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn port_wait_stops_at_an_error_other_than_refused() {
+        let started = Instant::now();
+        wait_while_cdp_port_refuses(
+            "http://agent-browser-test.invalid:9222",
+            Duration::from_secs(10),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
     async fn port_wait_gives_up_after_the_window() {
         let port = free_local_port();
         let started = Instant::now();
