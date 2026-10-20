@@ -101,6 +101,7 @@ pub async fn take_screenshot(
     ref_map: &RefMap,
     options: &ScreenshotOptions,
     iframe_sessions: &HashMap<String, String>,
+    viewport_refs: Option<Vec<super::snapshot::ViewportRef>>,
 ) -> Result<ScreenshotResult, String> {
     let target_rect = if options.annotate {
         match options.selector.as_deref() {
@@ -114,21 +115,33 @@ pub async fn take_screenshot(
         None
     };
 
-    let raw_annotations = if options.annotate {
-        collect_annotations(client, session_id, ref_map).await?
-    } else {
-        Vec::new()
+    let raw_annotations = match viewport_refs {
+        Some(refs) => refs
+            .into_iter()
+            .map(|r| RawAnnotation {
+                number: r
+                    .ref_id
+                    .strip_prefix('e')
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0),
+                ref_id: r.ref_id,
+                role: r.role,
+                name: (!r.name.is_empty()).then_some(r.name),
+                rect: Rect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.width,
+                    height: r.height,
+                },
+            })
+            .collect(),
+        None if options.annotate => collect_annotations(client, session_id, ref_map).await?,
+        None => Vec::new(),
     };
 
     let overlay_items = filter_annotations(raw_annotations, target_rect.as_ref());
-    let viewport = if options.annotate && !options.full_page && options.selector.is_none() {
-        get_viewport_rect(client, session_id).await?
-    } else {
-        None
-    };
-    let visible_items = visible_annotations(&overlay_items, viewport.as_ref());
-    let overlay_injected = if options.annotate && !visible_items.is_empty() {
-        inject_annotation_overlay(client, session_id, &visible_items).await?;
+    let overlay_injected = if options.annotate && !overlay_items.is_empty() {
+        inject_annotation_overlay(client, session_id, &overlay_items).await?;
         true
     } else {
         false
@@ -156,56 +169,6 @@ pub async fn take_screenshot(
     Ok(ScreenshotResult {
         base64,
         annotations,
-    })
-}
-
-/// Captures a viewport screenshot annotated with refs already collected for the visible elements.
-pub async fn take_viewport_annotated_screenshot(
-    client: &CdpClient,
-    session_id: &str,
-    ref_map: &RefMap,
-    options: &ScreenshotOptions,
-    iframe_sessions: &HashMap<String, String>,
-    refs: Vec<super::snapshot::ViewportRef>,
-) -> Result<ScreenshotResult, String> {
-    let raw_annotations = refs
-        .into_iter()
-        .map(|r| RawAnnotation {
-            number: r
-                .ref_id
-                .strip_prefix('e')
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(0),
-            ref_id: r.ref_id,
-            role: r.role,
-            name: (!r.name.is_empty()).then_some(r.name),
-            rect: Rect {
-                x: r.x,
-                y: r.y,
-                width: r.width,
-                height: r.height,
-            },
-        })
-        .collect();
-    let overlay_items = filter_annotations(raw_annotations, None);
-    let draw_items: Vec<&RawAnnotation> = overlay_items.iter().collect();
-    let overlay_injected = if !draw_items.is_empty() {
-        inject_annotation_overlay(client, session_id, &draw_items).await?;
-        true
-    } else {
-        false
-    };
-
-    let base64 =
-        capture_screenshot_base64(client, session_id, ref_map, options, iframe_sessions).await;
-
-    if overlay_injected {
-        let _ = remove_annotation_overlay(client, session_id).await;
-    }
-
-    Ok(ScreenshotResult {
-        base64: base64?,
-        annotations: project_annotations(&overlay_items, None, None),
     })
 }
 
@@ -435,46 +398,6 @@ fn filter_annotations(
     items
 }
 
-/// Returns the annotations whose boxes can appear in the captured image; all of them when no viewport bound applies.
-fn visible_annotations<'a>(
-    annotations: &'a [RawAnnotation],
-    viewport: Option<&Rect>,
-) -> Vec<&'a RawAnnotation> {
-    annotations
-        .iter()
-        .filter(|annotation| viewport.is_none_or(|view| overlaps(&annotation.rect, view)))
-        .collect()
-}
-
-/// Reads the visual viewport in CSS pixels, padded by the overlay label height so labels drawn above a box stay visible.
-async fn get_viewport_rect(client: &CdpClient, session_id: &str) -> Result<Option<Rect>, String> {
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: "({w: window.innerWidth || 0, h: window.innerHeight || 0})".to_string(),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await?;
-    let value = result.result.value.unwrap_or(Value::Null);
-    let width = value.get("w").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let height = value.get("h").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    if width <= 0.0 || height <= 0.0 {
-        return Ok(None);
-    }
-    Ok(Some(Rect {
-        x: -OVERLAY_LABEL_MARGIN,
-        y: -OVERLAY_LABEL_MARGIN,
-        width: width + 2.0 * OVERLAY_LABEL_MARGIN,
-        height: height + 2.0 * OVERLAY_LABEL_MARGIN,
-    }))
-}
-
-const OVERLAY_LABEL_MARGIN: f64 = 64.0;
-
 /// Full-page PNGs larger than this many CSS pixels use Chrome's faster lossless encoder; smaller ones keep the compact default.
 const FAST_PNG_MIN_PIXELS: f64 = 16_000_000.0;
 
@@ -490,7 +413,7 @@ fn overlaps(left: &Rect, right: &Rect) -> bool {
 async fn inject_annotation_overlay(
     client: &CdpClient,
     session_id: &str,
-    annotations: &[&RawAnnotation],
+    annotations: &[RawAnnotation],
 ) -> Result<(), String> {
     let overlay_data = annotations
         .iter()

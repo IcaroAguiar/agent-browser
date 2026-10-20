@@ -289,23 +289,20 @@ struct CursorElementInfo {
 
 struct RoleNameTracker {
     counts: HashMap<String, usize>,
-    entries: Vec<(usize, String)>,
 }
 
 impl RoleNameTracker {
     fn new() -> Self {
         Self {
             counts: HashMap::new(),
-            entries: Vec::new(),
         }
     }
 
-    fn track(&mut self, role: &str, name: &str, node_idx: usize) -> usize {
+    fn track(&mut self, role: &str, name: &str) -> usize {
         let key = format!("{}:{}", role, name);
-        let count = self.counts.entry(key.clone()).or_insert(0);
+        let count = self.counts.entry(key).or_insert(0);
         let nth = *count;
         *count += 1;
-        self.entries.push((node_idx, key));
         nth
     }
 
@@ -667,24 +664,14 @@ fn assign_refs(
 
     for (idx, node) in tree_nodes.iter().enumerate() {
         let role = node.role.as_str();
-        let mut should_ref = if INTERACTIVE_ROLES.contains(&role) {
-            true
-        } else if CONTENT_ROLES.contains(&role) {
-            !node.name.is_empty()
-        } else {
-            false
-        };
-
-        if node
-            .backend_node_id
-            .is_some_and(|bid| cursor_elements.contains_key(&bid))
-        {
-            // ref elements that are cursor-interactive
-            should_ref = true;
-        }
+        let should_ref = INTERACTIVE_ROLES.contains(&role)
+            || (CONTENT_ROLES.contains(&role) && !node.name.is_empty())
+            || node
+                .backend_node_id
+                .is_some_and(|bid| cursor_elements.contains_key(&bid));
 
         if should_ref {
-            let nth = tracker.track(role, &node.name, idx);
+            let nth = tracker.track(role, &node.name);
             nodes_with_refs.push((idx, nth));
         }
     }
@@ -693,6 +680,7 @@ fn assign_refs(
 
     for (idx, nth) in &nodes_with_refs {
         let node = &tree_nodes[*idx];
+        let backend_node_id = node.backend_node_id;
         let key = format!("{}:{}", node.role, node.name);
         let actual_nth = if duplicates.contains_key(&key) {
             Some(*nth)
@@ -700,10 +688,7 @@ fn assign_refs(
             None
         };
 
-        let ref_id = if let Some(backend_node_id) = tree_nodes[*idx]
-            .backend_node_id
-            .filter(|_| document_is_known)
-        {
+        let ref_id = if let Some(backend_node_id) = backend_node_id.filter(|_| document_is_known) {
             if let Some(existing) = ref_map.durable_ref(session_id, frame_id, backend_node_id) {
                 existing.to_string()
             } else {
@@ -720,24 +705,20 @@ fn assign_refs(
 
         ref_map.add_with_frame(
             ref_id.clone(),
-            tree_nodes[*idx].backend_node_id,
-            &tree_nodes[*idx].role,
-            &tree_nodes[*idx].name,
+            backend_node_id,
+            &node.role,
+            &node.name,
             actual_nth,
             frame_id,
         );
 
-        tree_nodes[*idx].has_ref = true;
-        tree_nodes[*idx].ref_id = Some(ref_id);
-    }
-
-    // Populate cursor_info for ref-bearing nodes
-    for (idx, _) in &nodes_with_refs {
-        if let Some(bid) = tree_nodes[*idx].backend_node_id {
-            if let Some(cursor_info) = cursor_elements.get(&bid) {
-                tree_nodes[*idx].cursor_info = Some((*cursor_info).clone());
-            }
-        }
+        let cursor_info = backend_node_id
+            .and_then(|bid| cursor_elements.get(&bid))
+            .cloned();
+        let node = &mut tree_nodes[*idx];
+        node.has_ref = true;
+        node.ref_id = Some(ref_id);
+        node.cursor_info = cursor_info;
     }
 
     ref_map.set_next_ref_num(next_ref);
@@ -1053,13 +1034,17 @@ const CURSOR_INFO_JS: &str = r#"
             }
         }
 
+        var kind = hasCursorPointer || hasOnClick ? 'clickable' : isEditable ? 'editable' : 'focusable';
+        var hints = [];
+        if (hasCursorPointer) hints.push('cursor:pointer');
+        if (hasOnClick) hints.push('onclick');
+        if (hasTabIndex) hints.push('tabindex');
+        if (isEditable) hints.push('contenteditable');
+
         return {
             text: text,
-            tagName: tagName,
-            hasOnClick: hasOnClick,
-            hasCursorPointer: hasCursorPointer,
-            hasTabIndex: hasTabIndex,
-            isEditable: isEditable,
+            kind: kind,
+            hints: hints,
             hiddenInputType: hiddenInputType,
             hiddenInputChecked: hiddenInputChecked
         };
@@ -1222,71 +1207,29 @@ async fn find_cursor_interactive_elements(
     Ok(map)
 }
 
+/// The JSON shape returned by `__abCursorInfo`.
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CursorInfoJson {
+    text: String,
+    kind: String,
+    hints: Vec<String>,
+    hidden_input_type: Option<String>,
+    hidden_input_checked: Option<String>,
+}
+
 /// Converts one `__abCursorInfo` result into the snapshot's cursor-interactive record.
 fn cursor_info_from_json(elem: &Value) -> CursorElementInfo {
-    // Role differentiation: v0.19.0 uses 'clickable' for cursor:pointer or onclick,
-    // 'focusable' for tabindex-only elements.
-    let has_cursor_pointer = elem
-        .get("hasCursorPointer")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let has_on_click = elem
-        .get("hasOnClick")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let has_tab_index = elem
-        .get("hasTabIndex")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let is_editable = elem
-        .get("isEditable")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let kind = if has_cursor_pointer || has_on_click {
-        "clickable"
-    } else if is_editable {
-        "editable"
-    } else {
-        "focusable"
-    };
-
-    let mut hints: Vec<String> = Vec::new();
-    if has_cursor_pointer {
-        hints.push("cursor:pointer".to_string());
-    }
-    if has_on_click {
-        hints.push("onclick".to_string());
-    }
-    if has_tab_index {
-        hints.push("tabindex".to_string());
-    }
-    if is_editable {
-        hints.push("contenteditable".to_string());
-    }
-
-    let text = elem
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    let hidden_input_kind = elem
-        .get("hiddenInputType")
-        .and_then(|v| v.as_str())
-        .and_then(HiddenInputKind::parse);
-    let hidden_input_checked = elem
-        .get("hiddenInputChecked")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
+    let info: CursorInfoJson = serde_json::from_value(elem.clone()).unwrap_or_default();
     CursorElementInfo {
-        kind: kind.to_string(),
-        hints,
-        text,
-        hidden_input_kind,
-        hidden_input_checked,
+        kind: info.kind,
+        hints: info.hints,
+        text: info.text.trim().to_string(),
+        hidden_input_kind: info
+            .hidden_input_type
+            .as_deref()
+            .and_then(HiddenInputKind::parse),
+        hidden_input_checked: info.hidden_input_checked,
     }
 }
 
@@ -1812,9 +1755,9 @@ mod tests {
     #[test]
     fn test_role_name_tracker() {
         let mut tracker = RoleNameTracker::new();
-        assert_eq!(tracker.track("button", "Submit", 0), 0);
-        assert_eq!(tracker.track("button", "Submit", 1), 1);
-        assert_eq!(tracker.track("button", "Cancel", 2), 0);
+        assert_eq!(tracker.track("button", "Submit"), 0);
+        assert_eq!(tracker.track("button", "Submit"), 1);
+        assert_eq!(tracker.track("button", "Cancel"), 0);
 
         let dups = tracker.get_duplicates();
         assert!(dups.contains_key("button:Submit"));

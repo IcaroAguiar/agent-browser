@@ -6045,104 +6045,154 @@ async fn e2e_screenshot_annotate_many_elements() {
     assert_success(&resp);
 }
 
-/// Verifies that a viewport `screenshot --annotate` labels only visible elements,
-/// stays fast on a page with thousands of off-screen elements, and keeps the refs
-/// from an earlier snapshot so off-screen refs still resolve (#509).
+/// Verifies that a viewport `screenshot --annotate` labels exactly the buttons in the
+/// viewport, before and after scrolling, keeps refs from an earlier snapshot so an
+/// off-screen ref still clicks the right button, and that `fullPage` labels all (#509).
 #[tokio::test]
 #[ignore]
 async fn e2e_screenshot_annotate_viewport_only() {
     let mut state = DaemonState::new();
+    async fn run(state: &mut DaemonState, mut cmd: serde_json::Value) -> serde_json::Value {
+        cmd["id"] = json!("1");
+        execute_command(&cmd, state).await
+    }
 
-    let resp = execute_command(
-        &json!({ "id": "1", "action": "launch", "headless": true }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
+    assert_success(&run(&mut state, json!({ "action": "launch", "headless": true })).await);
+    assert_success(
+        &run(
+            &mut state,
+            json!({ "action": "viewport", "width": 1280, "height": 720 }),
+        )
+        .await,
+    );
 
     let mut html = String::from("<html><body style=\"margin:0\">");
     for i in 1..=5000 {
         html.push_str(&format!(
-            "<div style=\"height:40px\"><button id=\"b{i}\">Button {i}</button></div>"
+            "<div style=\"height:40px\"><button id=\"b{i}\" onclick=\"window.__clicked=this.id\">Button {i}</button></div>"
         ));
     }
     html.push_str("</body></html>");
-    let resp = execute_command(
-        &json!({ "id": "2", "action": "setcontent", "html": html }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
+    assert_success(&run(&mut state, json!({ "action": "setcontent", "html": html })).await);
 
-    let resp = execute_command(
-        &json!({ "id": "3", "action": "snapshot", "interactive": true }),
+    let visible_js = "JSON.stringify([...document.querySelectorAll('button')].filter(b => { const r = b.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; }).map(b => b.textContent).sort())";
+    let visible = |resp: &serde_json::Value| -> Vec<String> {
+        serde_json::from_str(get_data(resp)["result"].as_str().unwrap()).unwrap()
+    };
+    let names = |resp: &serde_json::Value| -> Vec<String> {
+        let mut v: Vec<String> = get_data(resp)["annotations"]
+            .as_array()
+            .expect("annotations")
+            .iter()
+            .map(|a| a["name"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+
+    let resp = run(
         &mut state,
+        json!({ "action": "snapshot", "interactive": true }),
     )
     .await;
     assert_success(&resp);
     let refs = get_data(&resp)["refs"].clone();
     let ref_for = |name: &str| {
         refs.as_object()
-            .and_then(|m| {
-                m.iter()
-                    .find(|(_, v)| v.get("name").and_then(|n| n.as_str()) == Some(name))
-            })
+            .and_then(|m| m.iter().find(|(_, v)| v["name"].as_str() == Some(name)))
             .map(|(k, _)| k.clone())
             .unwrap_or_else(|| panic!("no ref for {name} in snapshot"))
     };
     let visible_ref = ref_for("Button 3");
     let offscreen_ref = ref_for("Button 4999");
 
-    let start = std::time::Instant::now();
-    let resp = execute_command(
-        &json!({ "id": "4", "action": "screenshot", "annotate": true }),
+    let resp = run(
         &mut state,
+        json!({ "action": "evaluate", "script": visible_js }),
+    )
+    .await;
+    assert_success(&resp);
+    let expected = visible(&resp);
+    assert!(expected.contains(&"Button 3".to_string()) && expected.len() < 100);
+
+    let start = std::time::Instant::now();
+    let resp = run(
+        &mut state,
+        json!({ "action": "screenshot", "annotate": true }),
     )
     .await;
     let elapsed = start.elapsed();
     assert_success(&resp);
-    let annotations = get_data(&resp)["annotations"]
-        .as_array()
-        .expect("Annotated screenshot should return annotations")
-        .clone();
-    assert!(
-        !annotations.is_empty() && annotations.len() < 100,
-        "expected only visible buttons, got {}",
-        annotations.len()
-    );
-    for ann in &annotations {
-        let y = ann["box"]["y"].as_f64().unwrap();
-        let h = ann["box"]["height"].as_f64().unwrap();
-        assert!(y + h > 0.0 && y < 2000.0, "annotation outside viewport: {ann}");
+    assert!(elapsed.as_secs() < 5, "viewport annotate took {elapsed:?}");
+    assert_eq!(names(&resp), expected);
+    for ann in get_data(&resp)["annotations"].as_array().unwrap() {
+        let (y, h) = (
+            ann["box"]["y"].as_f64().unwrap(),
+            ann["box"]["height"].as_f64().unwrap(),
+        );
+        assert!(
+            y + h > 0.0 && y < 720.0,
+            "annotation outside viewport: {ann}"
+        );
     }
-    let button3 = annotations
+    let button3 = get_data(&resp)["annotations"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|ann| ann.get("name").and_then(|v| v.as_str()) == Some("Button 3"))
+        .find(|a| a["name"].as_str() == Some("Button 3"))
+        .cloned()
         .expect("Button 3 should be annotated");
     assert_eq!(button3["ref"].as_str(), Some(visible_ref.as_str()));
-    assert!(
-        elapsed.as_secs() < 5,
-        "viewport annotate took {elapsed:?} on a 5000-button page"
+
+    assert_success(
+        &run(
+            &mut state,
+            json!({ "action": "evaluate", "script": "window.scrollTo(0, document.body.scrollHeight)" }),
+        )
+        .await,
+    );
+    let resp = run(
+        &mut state,
+        json!({ "action": "evaluate", "script": visible_js }),
+    )
+    .await;
+    let expected = visible(&resp);
+    assert!(expected.contains(&"Button 5000".to_string()) && expected.len() < 100);
+    let resp = run(
+        &mut state,
+        json!({ "action": "screenshot", "annotate": true }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(names(&resp), expected);
+
+    assert_success(
+        &run(
+            &mut state,
+            json!({ "action": "click", "selector": format!("@{offscreen_ref}") }),
+        )
+        .await,
+    );
+    let resp = run(
+        &mut state,
+        json!({ "action": "evaluate", "script": "window.__clicked" }),
+    )
+    .await;
+    assert_eq!(get_data(&resp)["result"].as_str(), Some("b4999"));
+
+    let resp = run(
+        &mut state,
+        json!({ "action": "screenshot", "annotate": true, "fullPage": true }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        names(&resp).len(),
+        5000,
+        "full-page annotate should label every button"
     );
 
-    let resp = execute_command(
-        &json!({ "id": "5", "action": "click", "selector": format!("@{offscreen_ref}") }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
-
-    let resp = execute_command(
-        &json!({ "id": "6", "action": "screenshot", "annotate": true, "fullPage": true }),
-        &mut state,
-    )
-    .await;
-    assert_success(&resp);
-    let full = get_data(&resp)["annotations"].as_array().unwrap().len();
-    assert!(full >= 5000, "full-page annotate should label every button, got {full}");
-
-    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
-    assert_success(&resp);
+    assert_success(&run(&mut state, json!({ "action": "close" })).await);
 }
 
 /// Verifies `snapshot` with many cursor-interactive elements completes in
