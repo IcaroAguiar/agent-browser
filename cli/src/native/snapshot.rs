@@ -738,6 +738,10 @@ pub struct ViewportRef {
 
 const VIEWPORT_OBJECT_GROUP: &str = "agent-browser-viewport";
 
+/// Upper bounds on what one viewport scan reads back, so a page cannot make the daemon allocate without limit.
+const VIEWPORT_MAX_ELEMENTS: usize = 10_000;
+const VIEWPORT_MAX_HOSTS: usize = 500;
+
 /// Elements that can carry a ref without cursor-interactive styling: the implicit and explicit roles in
 /// `INTERACTIVE_ROLES` and `CONTENT_ROLES`.
 const VIEWPORT_CANDIDATES: &str = "a,area,button,input,select,textarea,option,iframe,h1,h2,h3,h4,h5,h6,td,th,li,article,section,main,nav,[role],[tabindex],[contenteditable]";
@@ -835,7 +839,7 @@ function(sel, inShadowRoot, everyElement) {{
     {CURSOR_INFO_JS}
     var W = window.innerWidth || 0, H = window.innerHeight || 0;
     if (!W || !H) return null;
-    var els = [], info = [], hosts = [];
+    var els = Object.create(null), info = Object.create(null), hosts = Object.create(null), count = 0, hostCount = 0;
     function visit(root, inShadow) {{
         var all = root.querySelectorAll('*');
         for (var i = 0; i < all.length; i++) {{
@@ -845,16 +849,17 @@ function(sel, inShadowRoot, everyElement) {{
             var visible = r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < W && r.top < H;
             var custom = el.localName.indexOf('-') > 0 && (visible || (!r.width && !r.height));
             var builtIn = visible && (/^(date|time|datetime-local|month|week)$/.test(el.type) && el.localName === 'input' || (el.localName === 'video' || el.localName === 'audio') && el.controls);
-            if (!el.shadowRoot && hosts.length < 500 && (custom || builtIn)) hosts.push(el);
+            if (!el.shadowRoot && hostCount < 500 && (custom || builtIn)) hosts[hostCount++] = el;
             if (!visible) continue;
             var cursor = !inShadow && el !== document.body && document.body && document.body.contains(el) ? __abCursorInfo(el) : null;
             if (!cursor && !everyElement && !el.matches(sel)) continue;
-            els.push(el);
-            info.push({{ rect: [r.x, r.y, r.width, r.height], cursor: cursor }});
+            els[count] = el;
+            info[count++] = {{ rect: [r.x, r.y, r.width, r.height], cursor: cursor }};
         }}
     }}
     visit(this, inShadowRoot || everyElement);
     els.info = info;
+    els.count = count;
     els.hosts = hosts;
     return els;
 }}
@@ -905,20 +910,16 @@ function(sel, inShadowRoot, everyElement) {{
                 }
                 continue;
             };
+            let limit = VIEWPORT_MAX_ELEMENTS.saturating_sub(info.len());
             let found = call(
                 array_id.clone(),
-                "function() { return this.info; }",
-                serde_json::json!([]),
+                "function(n) { var out = Object.create(null), c = 0; for (; c < n && c < this.count; c++) out[c] = this.info[c]; out.count = c; return out; }",
+                serde_json::json!([{ "value": limit }]),
                 true,
             )
             .await?;
-            let found = found["result"]["value"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            let mut ids = array_object_ids(client, session_id, &array_id).await?;
-            ids.resize(found.len(), None);
-            element_ids.extend(ids);
+            let found = indexed_values(&found["result"]["value"], limit);
+            element_ids.extend(array_object_ids(client, session_id, &array_id, found.len()).await?);
             info.extend(found);
             let hosts = call(
                 array_id,
@@ -930,7 +931,7 @@ function(sel, inShadowRoot, everyElement) {{
             let Some(hosts_id) = object_id(&hosts["result"]) else {
                 continue;
             };
-            for host in array_object_ids(client, session_id, &hosts_id)
+            for host in array_object_ids(client, session_id, &hosts_id, VIEWPORT_MAX_HOSTS)
                 .await?
                 .into_iter()
                 .flatten()
@@ -986,15 +987,24 @@ function(sel, inShadowRoot, everyElement) {{
     Ok((nodes, rects, cursor_elements))
 }
 
+/// Reads `count` entries keyed "0", "1", ... from an object returned by a page script, at most `limit`.
+fn indexed_values(value: &Value, limit: usize) -> Vec<Value> {
+    let count = value["count"].as_u64().unwrap_or(0) as usize;
+    (0..count.min(limit))
+        .map_while(|i| value.get(i.to_string()).cloned())
+        .collect()
+}
+
 fn object_id(remote: &Value) -> Option<String> {
     remote["objectId"].as_str().map(str::to_string)
 }
 
-/// Returns the element handles of a remote array, indexed by position.
+/// Returns the element handles of a remote array at positions below `len`; the page cannot grow the result.
 async fn array_object_ids(
     client: &CdpClient,
     session_id: &str,
     array_id: &str,
+    len: usize,
 ) -> Result<Vec<Option<String>>, String> {
     let props = client
         .send_command(
@@ -1003,13 +1013,14 @@ async fn array_object_ids(
             Some(session_id),
         )
         .await?;
-    let mut ids = Vec::new();
+    let mut ids = vec![None; len];
     for prop in props["result"].as_array().into_iter().flatten() {
-        if let Some(i) = prop["name"].as_str().and_then(|n| n.parse::<usize>().ok()) {
-            if ids.len() <= i {
-                ids.resize(i + 1, None);
-            }
-            ids[i] = object_id(&prop["value"]);
+        if let Some(slot) = prop["name"]
+            .as_str()
+            .and_then(|n| n.parse::<usize>().ok())
+            .and_then(|i| ids.get_mut(i))
+        {
+            *slot = object_id(&prop["value"]);
         }
     }
     Ok(ids)
@@ -1157,11 +1168,8 @@ const CURSOR_INFO_JS: &str = r#"
         }
 
         var kind = hasCursorPointer || hasOnClick ? 'clickable' : isEditable ? 'editable' : 'focusable';
-        var hints = [];
-        if (hasCursorPointer) hints.push('cursor:pointer');
-        if (hasOnClick) hints.push('onclick');
-        if (hasTabIndex) hints.push('tabindex');
-        if (isEditable) hints.push('contenteditable');
+        var hints = (hasCursorPointer ? ',cursor:pointer' : '') + (hasOnClick ? ',onclick' : '') +
+            (hasTabIndex ? ',tabindex' : '') + (isEditable ? ',contenteditable' : '');
 
         return {
             text: text,
@@ -1189,7 +1197,8 @@ async fn find_cursor_interactive_elements(
     let js = format!(
         r#"
 (function() {{
-    var results = [];
+    var results = Object.create(null), count = 0;
+    results.count = 0;
     if (!document.body) return results;
     {CURSOR_INFO_JS}
     var allElements = document.body.querySelectorAll('*');
@@ -1197,9 +1206,10 @@ async fn find_cursor_interactive_elements(
         var el = allElements[i];
         var info = __abCursorInfo(el);
         if (!info) continue;
-        el.setAttribute('data-__ab-ci', String(results.length));
-        results.push(info);
+        el.setAttribute('data-__ab-ci', String(count));
+        results[count++] = info;
     }}
+    results.count = count;
     return results;
 }})()
 "#
@@ -1217,11 +1227,7 @@ async fn find_cursor_interactive_elements(
         )
         .await?;
 
-    let elements: Vec<Value> = result
-        .result
-        .value
-        .and_then(|v| serde_json::from_value::<Vec<Value>>(v).ok())
-        .unwrap_or_default();
+    let elements = indexed_values(&result.result.value.unwrap_or(Value::Null), usize::MAX);
 
     if elements.is_empty() {
         return Ok(HashMap::new());
@@ -1335,7 +1341,7 @@ async fn find_cursor_interactive_elements(
 struct CursorInfoJson {
     text: String,
     kind: String,
-    hints: Vec<String>,
+    hints: String,
     hidden_input_type: Option<String>,
     hidden_input_checked: Option<String>,
 }
@@ -1345,7 +1351,12 @@ fn cursor_info_from_json(elem: &Value) -> CursorElementInfo {
     let info: CursorInfoJson = serde_json::from_value(elem.clone()).unwrap_or_default();
     CursorElementInfo {
         kind: info.kind,
-        hints: info.hints,
+        hints: info
+            .hints
+            .split(',')
+            .filter(|hint| !hint.is_empty())
+            .map(str::to_string)
+            .collect(),
         text: info.text.trim().to_string(),
         hidden_input_kind: info
             .hidden_input_type
@@ -1809,6 +1820,30 @@ fn collect_backend_node_ids(node: &Value, ids: &mut std::collections::HashSet<i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_values_ignores_page_supplied_counts_and_extra_keys() {
+        let value =
+            serde_json::json!({ "count": 4294967295u64, "0": "a", "1": "b", "4294967290": "x" });
+        assert_eq!(indexed_values(&value, usize::MAX), vec!["a", "b"]);
+        assert_eq!(indexed_values(&value, 1), vec!["a"]);
+        assert!(indexed_values(&serde_json::json!({ "0": "a" }), 10).is_empty());
+        assert!(indexed_values(&Value::Null, 10).is_empty());
+    }
+
+    #[test]
+    fn cursor_info_hints_keep_order_and_skip_empty() {
+        let info = cursor_info_from_json(&serde_json::json!({
+            "text": "  Card  ",
+            "kind": "clickable",
+            "hints": ",cursor:pointer,onclick,tabindex",
+        }));
+        assert_eq!(info.hints, vec!["cursor:pointer", "onclick", "tabindex"]);
+        assert_eq!(info.text, "Card");
+        assert!(cursor_info_from_json(&serde_json::json!({ "hints": "" }))
+            .hints
+            .is_empty());
+    }
 
     #[test]
     fn test_normalize_snapshot_name_preserves_word_boundaries() {

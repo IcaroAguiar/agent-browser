@@ -355,12 +355,14 @@ async fn layout_bounds(client: &CdpClient, session_id: &str, refs: usize) -> Has
     if refs < LAYOUT_BOUNDS_MIN_REFS {
         return HashMap::new();
     }
-    let elements = get_number(
-        client,
-        session_id,
-        "document.getElementsByTagName('*').length",
-    )
-    .await;
+    let elements = client
+        .evaluate_value(
+            "document.getElementsByTagName('*').length",
+            Some(session_id),
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_f64());
     if elements.is_none_or(|n| (refs as f64) * 4.0 < n) {
         return HashMap::new();
     }
@@ -462,22 +464,6 @@ async fn layout_bounds(client: &CdpClient, session_id: &str, refs: usize) -> Has
         }
     }
     map
-}
-
-async fn get_number(client: &CdpClient, session_id: &str, expression: &str) -> Option<f64> {
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: expression.to_string(),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
-            Some(session_id),
-        )
-        .await
-        .ok()?;
-    result.result.value.as_ref().and_then(Value::as_f64)
 }
 
 async fn get_rect_for_selector(
@@ -656,19 +642,12 @@ async fn remove_annotation_overlay(client: &CdpClient, session_id: &str) -> Resu
 }
 
 async fn get_scroll_offsets(client: &CdpClient, session_id: &str) -> Result<(f64, f64), String> {
-    let result: EvaluateResult = client
-        .send_command_typed(
-            "Runtime.evaluate",
-            &EvaluateParams {
-                expression: "({x: window.scrollX || 0, y: window.scrollY || 0})".to_string(),
-                return_by_value: Some(true),
-                await_promise: Some(false),
-            },
+    let value = client
+        .evaluate_value(
+            "({x: window.scrollX || 0, y: window.scrollY || 0})",
             Some(session_id),
         )
         .await?;
-
-    let value = result.result.value.unwrap_or(Value::Null);
     let x = value.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let y = value.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
     Ok((x, y))

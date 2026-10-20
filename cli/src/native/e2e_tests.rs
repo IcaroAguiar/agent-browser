@@ -29,6 +29,12 @@ fn assert_success(resp: &Value) {
     );
 }
 
+/// Runs one daemon command with a fixed id, for tests that issue many commands.
+async fn run_cmd(state: &mut DaemonState, mut cmd: serde_json::Value) -> serde_json::Value {
+    cmd["id"] = json!("1");
+    execute_command(&cmd, state).await
+}
+
 fn get_data(resp: &Value) -> &Value {
     resp.get("data").expect("Missing 'data' in response")
 }
@@ -6052,14 +6058,10 @@ async fn e2e_screenshot_annotate_many_elements() {
 #[ignore]
 async fn e2e_screenshot_annotate_viewport_only() {
     let mut state = DaemonState::new();
-    async fn run(state: &mut DaemonState, mut cmd: serde_json::Value) -> serde_json::Value {
-        cmd["id"] = json!("1");
-        execute_command(&cmd, state).await
-    }
 
-    assert_success(&run(&mut state, json!({ "action": "launch", "headless": true })).await);
+    assert_success(&run_cmd(&mut state, json!({ "action": "launch", "headless": true })).await);
     assert_success(
-        &run(
+        &run_cmd(
             &mut state,
             json!({ "action": "viewport", "width": 1280, "height": 720 }),
         )
@@ -6073,7 +6075,7 @@ async fn e2e_screenshot_annotate_viewport_only() {
         ));
     }
     html.push_str("</body></html>");
-    assert_success(&run(&mut state, json!({ "action": "setcontent", "html": html })).await);
+    assert_success(&run_cmd(&mut state, json!({ "action": "setcontent", "html": html })).await);
 
     let visible_js = "JSON.stringify([...document.querySelectorAll('button')].filter(b => { const r = b.getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; }).map(b => b.textContent).sort())";
     let visible = |resp: &serde_json::Value| -> Vec<String> {
@@ -6090,7 +6092,7 @@ async fn e2e_screenshot_annotate_viewport_only() {
         v
     };
 
-    let resp = run(
+    let resp = run_cmd(
         &mut state,
         json!({ "action": "snapshot", "interactive": true }),
     )
@@ -6106,7 +6108,7 @@ async fn e2e_screenshot_annotate_viewport_only() {
     let visible_ref = ref_for("Button 3");
     let offscreen_ref = ref_for("Button 4999");
 
-    let resp = run(
+    let resp = run_cmd(
         &mut state,
         json!({ "action": "evaluate", "script": visible_js }),
     )
@@ -6116,7 +6118,7 @@ async fn e2e_screenshot_annotate_viewport_only() {
     assert!(expected.contains(&"Button 3".to_string()) && expected.len() < 100);
 
     let start = std::time::Instant::now();
-    let resp = run(
+    let resp = run_cmd(
         &mut state,
         json!({ "action": "screenshot", "annotate": true }),
     )
@@ -6145,20 +6147,20 @@ async fn e2e_screenshot_annotate_viewport_only() {
     assert_eq!(button3["ref"].as_str(), Some(visible_ref.as_str()));
 
     assert_success(
-        &run(
+        &run_cmd(
             &mut state,
             json!({ "action": "evaluate", "script": "window.scrollTo(0, document.body.scrollHeight)" }),
         )
         .await,
     );
-    let resp = run(
+    let resp = run_cmd(
         &mut state,
         json!({ "action": "evaluate", "script": visible_js }),
     )
     .await;
     let expected = visible(&resp);
     assert!(expected.contains(&"Button 5000".to_string()) && expected.len() < 100);
-    let resp = run(
+    let resp = run_cmd(
         &mut state,
         json!({ "action": "screenshot", "annotate": true }),
     )
@@ -6167,13 +6169,13 @@ async fn e2e_screenshot_annotate_viewport_only() {
     assert_eq!(names(&resp), expected);
 
     assert_success(
-        &run(
+        &run_cmd(
             &mut state,
             json!({ "action": "click", "selector": format!("@{offscreen_ref}") }),
         )
         .await,
     );
-    let resp = run(
+    let resp = run_cmd(
         &mut state,
         json!({ "action": "evaluate", "script": "window.__clicked" }),
     )
@@ -6183,8 +6185,8 @@ async fn e2e_screenshot_annotate_viewport_only() {
     let small: String = (1..=300)
         .map(|i| format!("<div style=\"height:40px\"><button>Button {i}</button></div>"))
         .collect();
-    assert_success(&run(&mut state, json!({ "action": "setcontent", "html": small })).await);
-    let resp = run(
+    assert_success(&run_cmd(&mut state, json!({ "action": "setcontent", "html": small })).await);
+    let resp = run_cmd(
         &mut state,
         json!({ "action": "screenshot", "annotate": true, "fullPage": true }),
     )
@@ -6195,7 +6197,7 @@ async fn e2e_screenshot_annotate_viewport_only() {
         300,
         "full-page annotate should label every button"
     );
-    let rects = run(
+    let rects = run_cmd(
         &mut state,
         json!({ "action": "evaluate", "script": "JSON.stringify(Object.fromEntries([...document.querySelectorAll('button')].map(b => { const r = b.getBoundingClientRect(); return [b.textContent, [r.x + scrollX, r.y + scrollY, r.width, r.height]]; })))" }),
     )
@@ -6213,7 +6215,59 @@ async fn e2e_screenshot_annotate_viewport_only() {
         }
     }
 
-    assert_success(&run(&mut state, json!({ "action": "close" })).await);
+    assert_success(&run_cmd(&mut state, json!({ "action": "close" })).await);
+}
+
+/// Viewport annotate must stay bounded and correct when the page tampers with array builtins, and must label
+/// controls inside closed shadow roots and the browser's own date-input controls.
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_viewport_hostile_and_shadow_content() {
+    let mut state = DaemonState::new();
+    assert_success(&run_cmd(&mut state, json!({ "action": "launch", "headless": true })).await);
+    let html = r#"<html><body>
+        <button>Plain</button><x-card></x-card><input type="date" aria-label="When">
+        <script>
+          customElements.define('x-card', class extends HTMLElement {
+            constructor() { super(); this.attachShadow({ mode: 'closed' }).innerHTML = '<button>Inside closed</button>'; }
+          });
+          const push = Array.prototype.push;
+          Array.prototype.push = function(...a) { this[4294967290] = a[0]; return push.apply(this, a); };
+          Object.defineProperty(Array.prototype, '0', { configurable: true, set(v) {
+            Object.defineProperty(this, '0', { value: v, writable: true, enumerable: true, configurable: true });
+            this[4294967291] = v;
+          } });
+        </script></body></html>"#;
+    assert_success(&run_cmd(&mut state, json!({ "action": "setcontent", "html": html })).await);
+
+    let start = std::time::Instant::now();
+    let resp = run_cmd(
+        &mut state,
+        json!({ "action": "screenshot", "annotate": true }),
+    )
+    .await;
+    assert_success(&resp);
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+    let names: Vec<String> = get_data(&resp)["annotations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["name"].as_str().map(String::from))
+        .collect();
+    for expected in ["Plain", "Inside closed", "Show date picker"] {
+        assert!(
+            names.iter().any(|n| n.contains(expected)),
+            "missing {expected} in {names:?}"
+        );
+    }
+
+    let resp = run_cmd(
+        &mut state,
+        json!({ "action": "snapshot", "interactive": true }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_success(&run_cmd(&mut state, json!({ "action": "close" })).await);
 }
 
 /// Verifies `snapshot` with many cursor-interactive elements completes in
