@@ -13,8 +13,9 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Write};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -3893,11 +3894,39 @@ fn append_common_global_args(
     Ok(())
 }
 
-fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
-    let exe = env::current_exe().map_err(|e| e.to_string())?;
-    let mut command = Command::new(exe);
+const POST_EXIT_DRAIN: Duration = Duration::from_secs(2);
+
+fn spawn_reader<R: io::Read + Send + 'static>(
+    mut stream: R,
+) -> (Arc<Mutex<Vec<u8>>>, thread::JoinHandle<()>) {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::clone(&buffer);
+    let handle = thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = stream.read(&mut chunk) {
+            if n == 0 || Arc::strong_count(&shared) == 1 {
+                break;
+            }
+            if let Ok(mut guard) = shared.lock() {
+                guard.extend_from_slice(&chunk[..n]);
+            }
+        }
+    });
+    (buffer, handle)
+}
+
+fn buffer_to_string(buffer: &Mutex<Vec<u8>>) -> String {
+    let bytes = buffer.lock().map(|g| g.clone()).unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Runs a command with piped output and a timeout. After the child exits it waits at most two seconds for the pipes to close, so a detached grandchild holding them cannot block the caller.
+fn run_command(
+    mut command: Command,
+    stdin_body: Option<String>,
+    timeout_ms: u64,
+) -> Result<CliRun, String> {
     command
-        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if stdin_body.is_some() {
@@ -3918,40 +3947,30 @@ fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Resu
             .map_err(|e| format!("failed to write child stdin: {}", e))?;
     }
 
-    let mut child_stdout = child
+    let child_stdout = child
         .stdout
         .take()
         .ok_or_else(|| "failed to open child stdout".to_string())?;
-    let mut child_stderr = child
+    let child_stderr = child
         .stderr
         .take()
         .ok_or_else(|| "failed to open child stderr".to_string())?;
 
-    let stdout_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        child_stdout.read_to_end(&mut buf).map(|_| buf)
-    });
-    let stderr_thread = thread::spawn(move || {
-        let mut buf = Vec::new();
-        child_stderr.read_to_end(&mut buf).map(|_| buf)
-    });
+    let (stdout_buf, stdout_thread) = spawn_reader(child_stdout);
+    let (stderr_buf, stderr_thread) = spawn_reader(child_stderr);
 
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    let stdout = join_output(stdout_thread)?;
-                    let stderr = join_output(stderr_thread)?;
-                    return Ok(CliRun {
-                        exit_code: None,
-                        stdout,
-                        stderr: append_timeout_message(stderr, timeout_ms),
-                    });
+                    timed_out = true;
+                    break None;
                 }
                 thread::sleep(Duration::from_millis(20));
             }
@@ -3959,22 +3978,30 @@ fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Resu
         }
     };
 
-    let stdout = join_output(stdout_thread)?;
-    let stderr = join_output(stderr_thread)?;
+    let deadline = Instant::now() + POST_EXIT_DRAIN;
+    while Instant::now() < deadline && !(stdout_thread.is_finished() && stderr_thread.is_finished())
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let stdout = buffer_to_string(&stdout_buf);
+    let mut stderr = buffer_to_string(&stderr_buf);
+    if timed_out {
+        stderr = append_timeout_message(stderr, timeout_ms);
+    }
 
     Ok(CliRun {
-        exit_code: status.code(),
+        exit_code: status.and_then(|s| s.code()),
         stdout,
         stderr,
     })
 }
 
-fn join_output(handle: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<String, String> {
-    let bytes = handle
-        .join()
-        .map_err(|_| "failed to join output reader".to_string())?
-        .map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+fn run_cli(args: &[String], stdin_body: Option<String>, timeout_ms: u64) -> Result<CliRun, String> {
+    let exe = env::current_exe().map_err(|e| e.to_string())?;
+    let mut command = Command::new(exe);
+    command.args(args);
+    run_command(command, stdin_body, timeout_ms)
 }
 
 fn append_timeout_message(stderr: String, timeout_ms: u64) -> String {
@@ -4258,6 +4285,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_returns_when_a_grandchild_holds_the_pipe() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30 & echo ready");
+        let started = Instant::now();
+        let run = run_command(command, None, 25_000).expect("run_command should succeed");
+        assert!(run.stdout.contains("ready"), "stdout: {:?}", run.stdout);
+        assert!(started.elapsed() < Duration::from_secs(15));
+    }
 
     #[test]
     fn tools_list_contains_typed_tools() {
