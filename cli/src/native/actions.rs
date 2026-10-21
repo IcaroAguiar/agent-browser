@@ -4387,11 +4387,20 @@ async fn auto_launch_inner(
     if let Some(ref server) = state.stream_server {
         options.viewport_size = Some(server.viewport().await);
     }
-    let engine = env::var("AGENT_BROWSER_ENGINE").ok();
+    let engine = if state.engine == "firefox" {
+        Some("firefox".to_string())
+    } else {
+        env::var("AGENT_BROWSER_ENGINE").ok()
+    };
     let cdp = env::var("AGENT_BROWSER_CDP").ok();
     let auto_connect = env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok();
     let provider = env::var("AGENT_BROWSER_PROVIDER").ok();
     if engine.as_deref() == Some("firefox") {
+        reject_firefox_launch_extras(
+            &launch_enable_features_from_env(),
+            &launch_init_script_paths_from_env(),
+            &plugins,
+        )?;
         let allowed = !current_allowed_domains(state).await.is_empty();
         return launch_firefox(state, options, cdp, auto_connect, provider, allowed)
             .await
@@ -5234,6 +5243,30 @@ async fn handle_launch_for_target(
     result
 }
 
+/// Rejects init scripts, launch features and launch-mutator plugins, which Firefox does not apply.
+fn reject_firefox_launch_extras(
+    enable_features: &[String],
+    init_scripts: &[String],
+    plugins: &[crate::plugins::PluginConfig],
+) -> Result<(), String> {
+    let unsupported = |flag: &str| Err(format!("{flag} is not supported with --engine firefox"));
+    if !enable_features.is_empty() {
+        return unsupported("--enable");
+    }
+    if !init_scripts.is_empty() {
+        return unsupported("--init-script");
+    }
+    if !crate::plugins::resolved_plugins_with_capability(
+        plugins,
+        crate::plugins::CAPABILITY_LAUNCH_MUTATE,
+    )
+    .is_empty()
+    {
+        return unsupported("launch-mutator plugins");
+    }
+    Ok(())
+}
+
 /// Validates the options and launches (or reuses) an owned Firefox for both launch paths.
 async fn launch_firefox(
     state: &mut DaemonState,
@@ -5269,6 +5302,7 @@ async fn launch_firefox(
     }
     let had_browser = has_active_browser_session(state);
     if had_browser {
+        let _ = auto_save_restore_state(state).await;
         close_current_browser(state).await?;
     }
     state.ref_map.invalidate_all_documents();
@@ -5448,6 +5482,11 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
             .map(String::from)
             .or_else(|| env::var("AGENT_BROWSER_PROVIDER").ok());
         let allowed = !allowed_domains.is_empty();
+        reject_firefox_launch_extras(
+            &enable_features,
+            &init_script_paths,
+            &plugins_from_command_or_env(cmd),
+        )?;
         return launch_firefox(state, launch_options, cdp, auto_connect, provider, allowed).await;
     }
 
@@ -5515,8 +5554,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
         true
     };
 
-    let had_browser_before_launch =
-        state.browser.is_some() || state.active_provider_session.is_some();
+    let had_browser_before_launch = has_active_browser_session(state);
 
     if needs_relaunch {
         if local_launch {

@@ -14584,6 +14584,29 @@ async fn e2e_firefox_smoke() {
             .is_some_and(|error| error.contains("Chrome")),
         "{resp}"
     );
+    firefox_eval(
+        &mut state,
+        "setTimeout(() => { document.body.innerHTML = '<p id=ready>Done</p>'; }, 300); 0",
+    )
+    .await;
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "w", "action": "wait", "function": "document.querySelector('#ready').textContent === 'Done'", "timeout": 5000 }),
+    )
+    .await;
+    assert_success(&resp);
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "l", "action": "launch", "headless": true, "engine": "firefox", "initScripts": ["x.js"] }),
+    )
+    .await;
+    assert_eq!(resp["success"], false, "{resp}");
+    assert!(
+        resp["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("--init-script")),
+        "{resp}"
+    );
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(

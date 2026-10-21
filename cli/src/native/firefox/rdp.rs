@@ -128,7 +128,7 @@ impl RdpClient {
             b.extend(e.clone());
         }
         let body = body.to_string();
-        let (tx, mut rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         {
             let mut w = self.writer.lock().await;
             self.pending
@@ -141,8 +141,9 @@ impl RdpClient {
                 .write_all(format!("{}:{}", body.len(), body).as_bytes())
                 .await
             {
-                rx.close();
-                self.discard_closed_waiters(to);
+                if let Some(q) = self.pending.lock().unwrap().get_mut(to) {
+                    q.pop_back();
+                }
                 return Err(format!("DevTools send failed: {e}"));
             }
         }
@@ -157,16 +158,7 @@ impl RdpClient {
                 None => Ok(reply),
             },
             Ok(Err(_)) => Err("DevTools connection closed".to_string()),
-            Err(_) => {
-                self.discard_closed_waiters(to);
-                Err(format!("DevTools request {kind} to {to} timed out"))
-            }
-        }
-    }
-
-    fn discard_closed_waiters(&self, to: &str) {
-        if let Some(q) = self.pending.lock().unwrap().get_mut(to) {
-            q.retain(|tx| !tx.is_closed());
+            Err(_) => Err(format!("DevTools request {kind} to {to} timed out")),
         }
     }
 }
@@ -252,6 +244,20 @@ mod tests {
         assert!(e.contains("enable"), "{e}");
         assert!(e.contains("act1"), "{e}");
         assert_eq!(get(&mut s).await["type"], "enable");
-        assert!(c.pending.lock().unwrap()["act1"].is_empty());
+    }
+
+    #[tokio::test]
+    async fn late_reply_after_timeout_does_not_resolve_next_request() {
+        let (c, mut s) = pair().await;
+        c.request_timeout("act1", "first", json!({}), Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(get(&mut s).await["type"], "first");
+        let c2 = c.clone();
+        let r2 = tokio::spawn(async move { c2.request("act1", "second", json!({})).await });
+        assert_eq!(get(&mut s).await["type"], "second");
+        put(&mut s, json!({"from":"act1","n":"late"})).await;
+        put(&mut s, json!({"from":"act1","n":"second"})).await;
+        assert_eq!(r2.await.unwrap().unwrap()["n"], "second");
     }
 }

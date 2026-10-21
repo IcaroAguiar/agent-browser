@@ -204,7 +204,7 @@ async fn poll_until_true_or_timeout(
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
-        if ff.eval(expression).await?.as_bool() == Some(true) {
+        if ff.eval_lenient(expression).await?.as_bool() == Some(true) {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
