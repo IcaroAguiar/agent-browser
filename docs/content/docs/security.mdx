@@ -246,6 +246,8 @@ Example policy (restrictive):
 }
 ```
 
+A missing or invalid policy file blocks every command until it is fixed (`close --all` can still shut the daemon down); an empty `allow` list falls back to `default`.
+
 <table>
   <thead>
     <tr><th>Category</th><th>Actions</th></tr>
