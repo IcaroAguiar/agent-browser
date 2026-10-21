@@ -2,4 +2,5 @@
 #![allow(dead_code)]
 
 pub mod bidi;
+pub mod process;
 pub mod rdp;
