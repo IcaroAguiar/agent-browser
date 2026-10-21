@@ -4870,6 +4870,22 @@ fn no_xvfb_from_launch_cmd(cmd: &Value) -> bool {
         .unwrap_or_else(no_xvfb_from_env)
 }
 
+/// Loads a `state.rs` file into whichever browser engine owns this session.
+async fn load_state_path_for_engine(
+    state: &mut DaemonState,
+    path: &str,
+) -> Option<Result<Vec<String>, String>> {
+    if let Some(ff) = state.firefox.as_mut() {
+        return Some(firefox::storage::load_state_path(ff, path).await);
+    }
+    if let Some(mgr) = state.browser.as_ref() {
+        if let Ok(session_id) = mgr.active_session_id() {
+            return Some(state::load_state(&mgr.client, session_id, path).await);
+        }
+    }
+    None
+}
+
 async fn try_auto_restore_state(state: &mut DaemonState) {
     state.restore_skipped_origins.clear();
     let session_name = match state.session_name.as_deref() {
@@ -4884,26 +4900,24 @@ async fn try_auto_restore_state(state: &mut DaemonState) {
         }
     };
     if let Some(path) = state::find_auto_state_file(&session_name) {
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                match state::load_state(&mgr.client, session_id, &path).await {
-                    Ok(skipped) => {
-                        state.restore_status = "loaded".to_string();
-                        state.restore_status_detail = None;
-                        state.restore_skipped_origins = skipped;
-                        state.restore_loaded_path = Some(path.clone());
-                        state.restore_load_failed = false;
-                        state.restore_validation_pending = state.restore_check_url.is_some()
-                            || state.restore_check_text.is_some()
-                            || state.restore_check_fn.is_some();
-                    }
-                    Err(err) => {
-                        state.restore_status = "load_failed".to_string();
-                        state.restore_status_detail = Some(err);
-                        state.restore_loaded_path = Some(path);
-                        state.restore_load_failed = true;
-                        state.restore_validation_pending = false;
-                    }
+        if let Some(result) = load_state_path_for_engine(state, &path).await {
+            match result {
+                Ok(skipped) => {
+                    state.restore_status = "loaded".to_string();
+                    state.restore_status_detail = None;
+                    state.restore_skipped_origins = skipped;
+                    state.restore_loaded_path = Some(path.clone());
+                    state.restore_load_failed = false;
+                    state.restore_validation_pending = state.restore_check_url.is_some()
+                        || state.restore_check_text.is_some()
+                        || state.restore_check_fn.is_some();
+                }
+                Err(err) => {
+                    state.restore_status = "load_failed".to_string();
+                    state.restore_status_detail = Some(err);
+                    state.restore_loaded_path = Some(path);
+                    state.restore_load_failed = true;
+                    state.restore_validation_pending = false;
                 }
             }
         }
@@ -5028,7 +5042,7 @@ pub(crate) async fn maybe_autosave_restore_state(state: &mut DaemonState, interv
         return;
     }
     // No browser means nothing to collect from.
-    if state.browser.is_none() {
+    if state.browser.is_none() && state.firefox.is_none() {
         return;
     }
     state.last_autosave_attempt = Some(std::time::Instant::now());
@@ -5066,6 +5080,23 @@ pub(crate) async fn auto_save_restore_state(
                 other
             ));
         }
+    }
+
+    let session_id = state.session_id.clone();
+    if let Some(ff) = state.firefox.as_ref() {
+        return match firefox::storage::save_auto_state(ff, &session_name, &session_id).await {
+            Ok(path) => {
+                state.restore_save_status = "saved".to_string();
+                state.restore_saved_path = Some(path.clone());
+                state.last_autosave_attempt = Some(std::time::Instant::now());
+                Ok(Some(path))
+            }
+            Err(err) => {
+                state.restore_save_status = "error".to_string();
+                state.restore_saved_path = None;
+                Err(err)
+            }
+        };
     }
 
     let Some(ref mgr) = state.browser else {
@@ -5109,10 +5140,8 @@ async fn load_storage_state(state: &mut DaemonState, path: &Option<String>) -> R
         ensure_state_replay_supported_by_active_domain_filter(state, "--state/storageState")
             .await?;
         let mut skipped = None;
-        if let Some(ref mgr) = state.browser {
-            if let Ok(session_id) = mgr.active_session_id() {
-                skipped = Some(state::load_state(&mgr.client, session_id, path).await?);
-            }
+        if let Some(result) = load_state_path_for_engine(state, path).await {
+            skipped = Some(result?);
         }
         if let Some(skipped) = skipped {
             mark_explicit_storage_state_loaded(state, path);
@@ -5231,10 +5260,12 @@ async fn launch_firefox(
         "launch",
         None,
     );
-    if let Some(ff) = state.firefox.as_mut() {
-        if !ff.has_exited() && state.launch_hash == Some(hash) {
-            return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
-        }
+    let storage_state = options.storage_state.clone();
+    let hash_matches = state.launch_hash == Some(hash);
+    let reuse_session = state.firefox.as_mut().is_some_and(|ff| !ff.has_exited());
+    if reuse_session && hash_matches {
+        load_storage_state(state, &storage_state).await?;
+        return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
     }
     let had_browser = has_active_browser_session(state);
     if had_browser {
@@ -5247,6 +5278,8 @@ async fn launch_firefox(
     write_engine_file(&state.session_id, &state.engine);
     state.launch_hash = Some(hash);
     state.firefox = Some(session);
+    try_auto_restore_state(state).await;
+    load_storage_state_or_rollback(state, &storage_state).await?;
     Ok(json!({ "launched": true, "relaunchedBrowser": had_browser }))
 }
 

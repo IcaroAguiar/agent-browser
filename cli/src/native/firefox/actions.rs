@@ -17,6 +17,9 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "content",
     "evaluate",
     "wait",
+    "waitforurl",
+    "waitforloadstate",
+    "waitforfunction",
     "tab_new",
     "tab_list",
     "tab_switch",
@@ -122,6 +125,9 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
         "content" => page::content(state).await,
         "evaluate" => page::evaluate(cmd, state).await,
         "wait" => page::wait(cmd, state).await,
+        "waitforurl" => page::waitforurl(cmd, state).await,
+        "waitforloadstate" => page::waitforloadstate(cmd, state).await,
+        "waitforfunction" => page::waitforfunction(cmd, state).await,
         "tab_new" => tabs::tab_new(cmd, state).await,
         "tab_list" => tabs::tab_list(state).await,
         "tab_switch" => tabs::tab_switch(cmd, state).await,
@@ -171,6 +177,24 @@ mod tests {
             .unwrap_err();
         assert_eq!(e, "`snapshot` is not supported on Firefox");
         assert!(state.firefox.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_variants_are_routed_to_the_page_handlers() {
+        for action in ["waitforurl", "waitforloadstate", "waitforfunction"] {
+            assert!(handles(action), "{action}");
+        }
+        let mut state = DaemonState::new();
+        let (ff, _tx, _) = fake_session().await;
+        state.firefox = Some(ff);
+        let result = execute(
+            "waitforloadstate",
+            &json!({"state": "none", "timeout": 50}),
+            &mut state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, json!({ "state": "none" }));
     }
 
     #[tokio::test]
