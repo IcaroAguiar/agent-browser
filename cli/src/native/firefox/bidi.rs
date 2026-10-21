@@ -139,7 +139,7 @@ impl BidiClient {
         let mut params = json!({
             "functionDeclaration": js,
             "target": {"context": context},
-            "arguments": args,
+            "arguments": args.iter().map(to_local).collect::<Vec<_>>(),
             "awaitPromise": true,
             "resultOwnership": "root",
         });
@@ -154,6 +154,24 @@ impl BidiClient {
                 .to_string());
         }
         Ok(remote_to_json(&r["result"]))
+    }
+}
+
+/// Wraps plain JSON as a BiDi LocalValue; values that already carry `type` or `sharedId` pass through.
+pub fn to_local(v: &Value) -> Value {
+    match v {
+        Value::Object(o) if o.contains_key("type") || o.contains_key("sharedId") => v.clone(),
+        Value::String(_) => json!({"type": "string", "value": v}),
+        Value::Number(_) => json!({"type": "number", "value": v}),
+        Value::Bool(_) => json!({"type": "boolean", "value": v}),
+        Value::Null => json!({"type": "null"}),
+        Value::Array(a) => {
+            json!({"type": "array", "value": a.iter().map(to_local).collect::<Vec<_>>()})
+        }
+        Value::Object(o) => json!({
+            "type": "object",
+            "value": o.iter().map(|(k, x)| json!([k, to_local(x)])).collect::<Vec<_>>(),
+        }),
     }
 }
 
@@ -270,6 +288,17 @@ mod tests {
             .unwrap_err();
         assert!(e.contains("timed out"), "{e}");
         server.abort();
+    }
+
+    #[test]
+    fn plain_json_becomes_local_values() {
+        assert_eq!(to_local(&json!(3)), json!({"type": "number", "value": 3}));
+        assert_eq!(
+            to_local(&json!(["a"])),
+            json!({"type": "array", "value": [{"type": "string", "value": "a"}]})
+        );
+        let node = json!({"sharedId": "n"});
+        assert_eq!(to_local(&node), node);
     }
 
     #[test]
