@@ -760,25 +760,20 @@ fn state_base_name(session_name: &str, session_id: &str) -> String {
     format!("{}.{}", session_name, session_id)
 }
 
-/// True when `fname` is a state file saved under `name`; legacy `{name}-{id}` files match only when the id has no `-` or `.`.
+/// True when `fname` is a state file saved under `name`: `{name}.{id}` with a non-empty id, or a legacy `{name}-{id}` whose id has no `-` or `.`.
 fn state_file_matches(fname: &str, name: &str) -> bool {
-    let Some(rest) = fname.strip_prefix(name) else {
+    let Some(stem) = fname.strip_prefix(name).and_then(|rest| {
+        [".json.enc.previous", ".json.previous", ".json.enc", ".json"]
+            .iter()
+            .find_map(|suffix| rest.strip_suffix(suffix))
+    }) else {
         return false;
     };
-    if rest.starts_with('.') {
-        return true;
+    match stem.split_at_checked(1) {
+        Some((".", id)) => !id.is_empty(),
+        Some(("-", id)) => !id.is_empty() && !id.contains(['-', '.']),
+        _ => false,
     }
-    let Some(tail) = rest.strip_prefix('-') else {
-        return false;
-    };
-    tail.find('.').is_some_and(|i| {
-        i > 0
-            && !tail[..i].contains('-')
-            && matches!(
-                &tail[i..],
-                ".json" | ".json.enc" | ".json.previous" | ".json.enc.previous"
-            )
-    })
 }
 
 pub fn find_auto_state_file(session_name: &str) -> Option<String> {
@@ -1000,6 +995,7 @@ mod tests {
 
         let found = find_auto_state_file("auth").unwrap();
         assert!(found.ends_with("auth.d1.json") || found.ends_with("auth-d1.json"));
+        assert!(find_auto_state_file("auth-d1").is_none());
         assert!(dispatch_state_command(&json!({"action":"state_clear"}))
             .unwrap()
             .is_err());
