@@ -61,6 +61,12 @@ fn proxy_capability(proxy: &str, bypass: Option<&str>) -> Value {
 }
 
 async fn connect_devtools(endpoint: &DevtoolsEndpoint) -> Result<RdpClient, String> {
+    tokio::time::timeout(DEVTOOLS_CONNECT_WINDOW, connect_devtools_loop(endpoint))
+        .await
+        .map_err(|_| "Firefox DevTools connection timed out".to_string())?
+}
+
+async fn connect_devtools_loop(endpoint: &DevtoolsEndpoint) -> Result<RdpClient, String> {
     let deadline = tokio::time::Instant::now() + DEVTOOLS_CONNECT_WINDOW;
     loop {
         let attempt = match endpoint {
@@ -89,7 +95,12 @@ impl FirefoxSession {
         .await
         .map_err(|e| format!("Firefox launch task failed: {e}"))??;
 
-        let bidi = BidiClient::connect(&format!("{}/session", process.bidi_url)).await?;
+        let bidi = tokio::time::timeout(
+            START_TIMEOUT,
+            BidiClient::connect(&format!("{}/session", process.bidi_url)),
+        )
+        .await
+        .map_err(|_| "Firefox BiDi connection timed out".to_string())??;
         let events = bidi.subscribe();
         let mut caps = json!({
             "acceptInsecureCerts": options.ignore_https_errors,
@@ -199,6 +210,15 @@ impl FirefoxSession {
 
     /// Evaluates `expression` in the active context and returns the decoded value.
     pub async fn eval(&self, expression: &str) -> Result<Value, String> {
+        self.eval_inner(expression, false).await
+    }
+
+    /// Like `eval`, but a script exception yields `null` so callers can keep polling.
+    pub async fn eval_lenient(&self, expression: &str) -> Result<Value, String> {
+        self.eval_inner(expression, true).await
+    }
+
+    async fn eval_inner(&self, expression: &str, lenient: bool) -> Result<Value, String> {
         let r = self
             .bidi
             .send(
@@ -212,6 +232,9 @@ impl FirefoxSession {
             )
             .await?;
         if r["type"] == "exception" {
+            if lenient {
+                return Ok(Value::Null);
+            }
             let d = &r["exceptionDetails"];
             let msg = d["exception"]["value"]
                 .as_str()
