@@ -37,6 +37,12 @@
         "from": "It is not supported on macOS or Windows.",
         "to": "Browser trust is not supported on macOS or Windows, where Chromium already uses the operating system trust store."
       }
+    ],
+    "/sessions": [
+      {
+        "from": "agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions.",
+        "to": "agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions. Saved tabs and windows are not carried over, and Chrome's crash-restore prompt is suppressed."
+      }
     ]
   },
   "resources": {

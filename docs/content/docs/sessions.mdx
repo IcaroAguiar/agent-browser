@@ -54,7 +54,7 @@ With `--pin-tab`, a session whose bound tab was closed gets a `tab_gone` error i
 
 ## Chrome profile reuse
 
-The simplest way to reuse your existing login state: pass a Chrome profile name to `--profile`. agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions.
+The simplest way to reuse your existing login state: pass a Chrome profile name to `--profile`. agent-browser copies the profile to a temp directory (read-only snapshot) and launches Chrome with your existing cookies and sessions. Saved tabs and windows are not carried over, and Chrome's crash-restore prompt is suppressed.
 
 ```bash
 # List available Chrome profiles

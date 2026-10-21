@@ -4010,6 +4010,7 @@ Snapshot Options:
 Authentication:
   --profile <name|path>      Chrome profile name (e.g., Default) to reuse login state,
                              or a directory path for a persistent custom profile
+                             (a named profile is copied without its saved tabs)
                              (or AGENT_BROWSER_PROFILE env)
   --restore [name]           Auto-save/restore cookies and localStorage.
                              Without a name, uses --session as the restore key

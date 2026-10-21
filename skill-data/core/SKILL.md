@@ -492,7 +492,7 @@ EOF
 --webgpu                # enable WebGPU (software Vulkan on Linux, no GPU needed)
 --auto-connect          # connect to an already-running Chrome
 --cdp <port|url>        # connect to a CDP port or WebSocket URL; root query slash is optional
---profile <name|path>   # use a Chrome profile (login state survives)
+--profile <name|path>   # use a Chrome profile (login state survives; a named profile is copied without saved tabs)
 --headers <json>        # HTTP headers scoped to the URL's origin
 --proxy <url>           # proxy server
 --ca-cert <path>        # trust a CA for CLI requests, and in local Chromium on Linux (install --with-deps provides certutil)
