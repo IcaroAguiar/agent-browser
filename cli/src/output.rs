@@ -3121,8 +3121,9 @@ Examples:
   agent-browser state save ./auth-state.json
   agent-browser state load ./auth-state.json
   agent-browser state list
-  agent-browser state show myapp-default.json
+  agent-browser state show myapp.default.json
   agent-browser state rename old-name new-name
+  agent-browser state clear myapp
   agent-browser state clear --all
   agent-browser state clean --older-than 7
 "##

@@ -1560,7 +1560,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_CLEAR,
             "State clear",
-            "Clear saved state.",
+            "Clear saved state for one session name, or every saved state with all=true. One of them is required.",
             json!({ "name": { "type": "string" }, "all": { "type": "boolean" } }),
             &[],
         ),

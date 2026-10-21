@@ -318,7 +318,7 @@ pub async fn save_state(
             if !is_valid_session_name(name) {
                 return Err(session_name_error(name));
             }
-            dir.join(format!("{}-{}.json", name, session_id_str))
+            dir.join(format!("{}.json", state_base_name(name, session_id_str)))
                 .to_string_lossy()
                 .to_string()
         }
@@ -361,7 +361,7 @@ pub async fn save_auto_state_transactional(
         )
     })?;
 
-    let base_name = format!("{}-{}", session_name, session_id_str);
+    let base_name = state_base_name(session_name, session_id_str);
     let final_json_path = dir.join(format!("{}.json", base_name));
     let final_path = if std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").is_ok() {
         PathBuf::from(format!("{}.enc", final_json_path.to_string_lossy()))
@@ -634,10 +634,14 @@ pub fn state_show(path: &str) -> Result<Value, String> {
     }))
 }
 
-pub fn state_clear(path: Option<&str>) -> Result<Value, String> {
+/// Deletes the state file at `path`, or every state file saved under `name`, or all of them when `all` is set; a name wins over `all`.
+pub fn state_clear(path: Option<&str>, name: Option<&str>, all: bool) -> Result<Value, String> {
     if let Some(p) = path {
         fs::remove_file(p).map_err(|e| format!("Failed to delete state: {}", e))?;
         return Ok(json!({ "deleted": p }));
+    }
+    if name.is_none() && !all {
+        return Err("state clear needs a session name or --all".to_string());
     }
 
     let dir = get_sessions_dir();
@@ -649,7 +653,8 @@ pub fn state_clear(path: Option<&str>) -> Result<Value, String> {
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if is_state_file(&path) {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if is_state_file(&path) && name.is_none_or(|n| state_file_matches(&fname, n)) {
                 let _ = fs::remove_file(&path);
                 count += 1;
             }
@@ -750,6 +755,26 @@ fn decrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
     Ok(plaintext)
 }
 
+/// Base file name `{name}.{session_id}` for a saved state; session names never contain `.`, so the name is the part before the first `.`.
+fn state_base_name(session_name: &str, session_id: &str) -> String {
+    format!("{}.{}", session_name, session_id)
+}
+
+/// True when `fname` is a state file saved under `name`; legacy `{name}-{id}` files match only when the id has no `-` or `.`.
+fn state_file_matches(fname: &str, name: &str) -> bool {
+    let Some(rest) = fname.strip_prefix(name) else {
+        return false;
+    };
+    if rest.starts_with('.') {
+        return true;
+    }
+    let Some(tail) = rest.strip_prefix('-') else {
+        return false;
+    };
+    tail.find('.')
+        .is_some_and(|i| i > 0 && !tail[..i].contains('-') && tail[i..].starts_with(".json"))
+}
+
 pub fn find_auto_state_file(session_name: &str) -> Option<String> {
     if !is_valid_session_name(session_name) {
         return None;
@@ -759,7 +784,6 @@ pub fn find_auto_state_file(session_name: &str) -> Option<String> {
     if !dir.exists() {
         return None;
     }
-    let prefix = format!("{}-", session_name);
     let mut best_path: Option<(String, std::time::SystemTime)> = None;
 
     if let Ok(entries) = fs::read_dir(&dir) {
@@ -770,7 +794,7 @@ pub fn find_auto_state_file(session_name: &str) -> Option<String> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let is_match = fname.starts_with(&prefix)
+            let is_match = state_file_matches(&fname, session_name)
                 && (fname.ends_with(".json") || fname.ends_with(".json.enc"));
             if !is_match {
                 continue;
@@ -801,7 +825,9 @@ pub fn dispatch_state_command(cmd: &Value) -> Option<Result<Value, String>> {
         ),
         "state_clear" => {
             let path = cmd.get("path").and_then(|v| v.as_str());
-            Some(state_clear(path))
+            let name = cmd.get("sessionName").and_then(|v| v.as_str());
+            let all = cmd.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+            Some(state_clear(path, name, all))
         }
         "state_clean" => {
             let days = cmd.get("days").and_then(|v| v.as_u64()).unwrap_or(30);
@@ -903,7 +929,11 @@ mod tests {
 
     #[test]
     fn test_state_clear_nonexistent_file() {
-        let result = state_clear(Some("/tmp/nonexistent-agent-browser-state-file.json"));
+        let result = state_clear(
+            Some("/tmp/nonexistent-agent-browser-state-file.json"),
+            None,
+            false,
+        );
         assert!(result.is_err());
     }
 
@@ -933,12 +963,44 @@ mod tests {
         fs::write(sessions.join("auth-test.json.previous"), "{}").unwrap();
         fs::write(sessions.join("auth-test.json.enc.previous"), "encrypted").unwrap();
 
-        let result = state_clear(None).unwrap();
+        let result = state_clear(None, None, true).unwrap();
 
         assert_eq!(result["deleted"], 3);
         assert!(!sessions.join("auth-test.json").exists());
         assert!(!sessions.join("auth-test.json.previous").exists());
         assert!(!sessions.join("auth-test.json.enc.previous").exists());
+    }
+
+    #[test]
+    fn test_state_clear_and_restore_match_exact_name() {
+        let guard = crate::test_utils::EnvGuard::new(&["HOME", "AGENT_BROWSER_NAMESPACE"]);
+        let dir = tempfile::tempdir().unwrap();
+        guard.set("HOME", dir.path().to_str().unwrap());
+        guard.remove("AGENT_BROWSER_NAMESPACE");
+
+        let sessions = get_sessions_dir();
+        fs::create_dir_all(&sessions).unwrap();
+        for f in [
+            "auth.d1.json",
+            "auth-d1.json",
+            "auth.d1.json.previous",
+            "auth-admin.d1.json",
+            "auth-admin-d1.json",
+            "other-d1.json",
+        ] {
+            fs::write(sessions.join(f), "{}").unwrap();
+        }
+
+        let found = find_auto_state_file("auth").unwrap();
+        assert!(found.ends_with("auth.d1.json") || found.ends_with("auth-d1.json"));
+        assert!(state_clear(None, None, false).is_err());
+        assert_eq!(
+            state_clear(None, Some("auth"), false).unwrap()["deleted"],
+            3
+        );
+        assert!(sessions.join("auth-admin.d1.json").exists());
+        assert!(sessions.join("auth-admin-d1.json").exists());
+        assert!(sessions.join("other-d1.json").exists());
     }
 
     #[test]

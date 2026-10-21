@@ -8,6 +8,14 @@
       {
         "from": "# Clear CA trust retained by the running session",
         "to": "# Clear CA trust retained by the running session\n--use-system-ca          # Use the OS trust store for CLI requests (read, install, upgrade, doctor)"
+      },
+      {
+        "from": "agent-browser state clear [name]      # Clear states for session name",
+        "to": "agent-browser state clear <name>      # Clear saved states for one session name"
+      },
+      {
+        "from": "agent-browser state clear --all       # Clear all saved states",
+        "to": "agent-browser state clear --all       # Clear all saved states (bare `state clear` is an error)"
       }
     ],
     "/configuration": [
@@ -36,6 +44,20 @@
       {
         "from": "It is not supported on macOS or Windows.",
         "to": "Browser trust is not supported on macOS or Windows, where Chromium already uses the operating system trust store."
+      }
+    ],
+    "/sessions": [
+      {
+        "from": "sessions/` and automatically loaded",
+        "to": "sessions/` as `<name>.<session-id>.json` and automatically loaded"
+      },
+      {
+        "from": "sessions/ and automatically loaded",
+        "to": "sessions/ as <name>.<session-id>.json and automatically loaded"
+      },
+      {
+        "from": "agent-browser state show my-session-default.json",
+        "to": "agent-browser state show my-session.default.json"
       }
     ]
   },
