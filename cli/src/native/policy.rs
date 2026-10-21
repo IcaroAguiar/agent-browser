@@ -80,11 +80,12 @@ impl ActionPolicy {
         let path = env::var("AGENT_BROWSER_ACTION_POLICY")
             .or_else(|_| env::var("AGENT_BROWSER_POLICY"))
             .ok()?;
-        Some(Self::load(&path).unwrap_or_else(|e| Self {
-            path: PathBuf::from(&path),
-            load_error: Some(format!("{} ({})", e, path)),
+        let mut policy = Self {
+            path: PathBuf::from(path),
             ..Self::default()
-        }))
+        };
+        policy.reload();
+        Some(policy)
     }
 
     /// Check whether an action is allowed, denied, or requires confirmation.
@@ -134,15 +135,14 @@ impl ActionPolicy {
         PolicyResult::Allow
     }
 
-    /// Reload policy from the file. Re-reads the JSON and updates the policy.
-    pub fn reload(&mut self) -> Result<(), String> {
-        let contents = fs::read_to_string(&self.path)
-            .map_err(|e| format!("Failed to read policy file: {}", e))?;
-        let mut policy: ActionPolicy =
-            serde_json::from_str(&contents).map_err(|e| format!("Invalid policy JSON: {}", e))?;
-        policy.path = self.path.clone();
-        *self = policy;
-        Ok(())
+    /// Re-read the policy file. A file that cannot be read or parsed leaves a policy that denies every action except `close`.
+    pub fn reload(&mut self) {
+        let path = self.path.clone();
+        *self = Self::load(&path.to_string_lossy()).unwrap_or_else(|e| Self {
+            load_error: Some(format!("{} ({})", e, path.display())),
+            path,
+            ..Self::default()
+        });
     }
 }
 
@@ -226,15 +226,30 @@ mod tests {
     }
 
     #[test]
-    fn test_unreadable_policy_fails_closed() {
-        let _guard = EnvGuard::new(&["AGENT_BROWSER_ACTION_POLICY", "AGENT_BROWSER_POLICY"]);
-        _guard.set("AGENT_BROWSER_ACTION_POLICY", "/nonexistent/policy.json");
-        let policy = ActionPolicy::load_if_exists().unwrap();
+    fn test_policy_fails_closed_on_load_and_reload() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ACTION_POLICY", "AGENT_BROWSER_POLICY"]);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("policy.json");
+        let path = file.to_string_lossy().to_string();
+        guard.set("AGENT_BROWSER_ACTION_POLICY", &path);
+        let mut policy = ActionPolicy::load_if_exists().unwrap();
+        assert!(matches!(policy.check("evaluate"), PolicyResult::Deny(_)));
+        assert_eq!(policy.check("close"), PolicyResult::Allow);
+
+        fs::write(&file, r#"{"default": "allow"}"#).unwrap();
+        policy.reload();
+        assert_eq!(policy.check("evaluate"), PolicyResult::Allow);
+
+        fs::write(&file, "{bad").unwrap();
+        policy.reload();
         match policy.check("evaluate") {
-            PolicyResult::Deny(r) => assert!(r.contains("/nonexistent/policy.json")),
+            PolicyResult::Deny(r) => assert!(r.contains(&path)),
             other => panic!("expected deny, got {:?}", other),
         }
-        assert_eq!(policy.check("close"), PolicyResult::Allow);
+
+        fs::write(&file, r#"{"default": "allow"}"#).unwrap();
+        policy.reload();
+        assert_eq!(policy.check("evaluate"), PolicyResult::Allow);
     }
 
     #[test]

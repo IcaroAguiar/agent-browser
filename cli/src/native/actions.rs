@@ -2933,7 +2933,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
 
     // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
-        let _ = policy.reload();
+        policy.reload();
         let mut confirmation_required: Option<String> = None;
         for policy_action in &policy_actions {
             match policy.check(policy_action) {
