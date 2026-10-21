@@ -3,10 +3,13 @@
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{
     split, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
 use tokio::sync::{broadcast, oneshot};
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 type Pending = Arc<Mutex<HashMap<String, VecDeque<oneshot::Sender<Value>>>>>;
 
@@ -110,12 +113,22 @@ impl RdpClient {
 
     /// Sends a request to an actor and returns its next reply; an `error` reply becomes `Err`.
     pub async fn request(&self, to: &str, kind: &str, extra: Value) -> Result<Value, String> {
+        self.request_timeout(to, kind, extra, DEFAULT_TIMEOUT).await
+    }
+
+    async fn request_timeout(
+        &self,
+        to: &str,
+        kind: &str,
+        extra: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let mut body = json!({"to": to, "type": kind});
         if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
             b.extend(e.clone());
         }
         let body = body.to_string();
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
         {
             let mut w = self.writer.lock().await;
             self.pending
@@ -124,20 +137,36 @@ impl RdpClient {
                 .entry(to.to_string())
                 .or_default()
                 .push_back(tx);
-            w.write_all(format!("{}:{}", body.len(), body).as_bytes())
+            if let Err(e) = w
+                .write_all(format!("{}:{}", body.len(), body).as_bytes())
                 .await
-                .map_err(|e| format!("DevTools send failed: {e}"))?;
+            {
+                rx.close();
+                self.discard_closed_waiters(to);
+                return Err(format!("DevTools send failed: {e}"));
+            }
         }
-        let reply = rx
-            .await
-            .map_err(|_| "DevTools connection closed".to_string())?;
-        match reply.get("error") {
-            Some(e) => Err(format!(
-                "{}: {}",
-                e.as_str().unwrap_or("error"),
-                reply["message"].as_str().unwrap_or("")
-            )),
-            None => Ok(reply),
+        let reply = tokio::time::timeout(timeout, rx).await;
+        match reply {
+            Ok(Ok(reply)) => match reply.get("error") {
+                Some(e) => Err(format!(
+                    "{}: {}",
+                    e.as_str().unwrap_or("error"),
+                    reply["message"].as_str().unwrap_or("")
+                )),
+                None => Ok(reply),
+            },
+            Ok(Err(_)) => Err("DevTools connection closed".to_string()),
+            Err(_) => {
+                self.discard_closed_waiters(to);
+                Err(format!("DevTools request {kind} to {to} timed out"))
+            }
+        }
+    }
+
+    fn discard_closed_waiters(&self, to: &str) {
+        if let Some(q) = self.pending.lock().unwrap().get_mut(to) {
+            q.retain(|tx| !tx.is_closed());
         }
     }
 }
@@ -210,5 +239,19 @@ mod tests {
         put(&mut s, json!({"from":"acc","enabled":true})).await;
         assert_eq!(r.await.unwrap().unwrap()["enabled"], true);
         assert_eq!(ev.recv().await.unwrap()["type"], "canBeDisabledChange");
+    }
+
+    #[tokio::test]
+    async fn unanswered_request_times_out() {
+        let (c, mut s) = pair().await;
+        let e = c
+            .request_timeout("act1", "enable", json!({}), Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(e.contains("timed out"), "{e}");
+        assert!(e.contains("enable"), "{e}");
+        assert!(e.contains("act1"), "{e}");
+        assert_eq!(get(&mut s).await["type"], "enable");
+        assert!(c.pending.lock().unwrap()["act1"].is_empty());
     }
 }
