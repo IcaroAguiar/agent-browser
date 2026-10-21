@@ -181,7 +181,7 @@ async fn capture_screenshot_base64(
 ) -> Result<String, String> {
     let mut params = CaptureScreenshotParams {
         format: Some(options.format.clone()),
-        quality: if options.format == "jpeg" {
+        quality: if matches!(options.format.as_str(), "jpeg" | "webp") {
             options.quality.or(Some(80))
         } else {
             None
@@ -697,10 +697,10 @@ fn project_annotations(
 
 /// Writes a captured image only after the caller decides it is needed.
 pub fn save_screenshot(base64_data: &str, options: &ScreenshotOptions) -> Result<String, String> {
-    let ext = if options.format == "jpeg" {
-        "jpg"
-    } else {
-        "png"
+    let ext = match options.format.as_str() {
+        "jpeg" => "jpg",
+        "webp" => "webp",
+        _ => "png",
     };
     let explicit_path = options.path.as_deref();
     let output_dir = options.output_dir.as_deref();
@@ -747,6 +747,19 @@ fn get_screenshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_screenshot_names_webp_files() {
+        let dir = std::env::temp_dir().join(format!("ab-webp-name-{}", std::process::id()));
+        let options = ScreenshotOptions {
+            format: "webp".to_string(),
+            output_dir: Some(dir.to_string_lossy().to_string()),
+            ..ScreenshotOptions::default()
+        };
+        let path = save_screenshot("UklGRg==", &options).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(path.ends_with(".webp"), "got {path}");
+    }
 
     #[test]
     fn filters_annotations_to_target_overlap() {
