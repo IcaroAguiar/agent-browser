@@ -771,8 +771,14 @@ fn state_file_matches(fname: &str, name: &str) -> bool {
     let Some(tail) = rest.strip_prefix('-') else {
         return false;
     };
-    tail.find('.')
-        .is_some_and(|i| i > 0 && !tail[..i].contains('-') && tail[i..].starts_with(".json"))
+    tail.find('.').is_some_and(|i| {
+        i > 0
+            && !tail[..i].contains('-')
+            && matches!(
+                &tail[i..],
+                ".json" | ".json.enc" | ".json.previous" | ".json.enc.previous"
+            )
+    })
 }
 
 pub fn find_auto_state_file(session_name: &str) -> Option<String> {
@@ -986,6 +992,7 @@ mod tests {
             "auth.d1.json.previous",
             "auth-admin.d1.json",
             "auth-admin-d1.json",
+            "auth-admin.json.json",
             "other-d1.json",
         ] {
             fs::write(sessions.join(f), "{}").unwrap();
@@ -993,11 +1000,14 @@ mod tests {
 
         let found = find_auto_state_file("auth").unwrap();
         assert!(found.ends_with("auth.d1.json") || found.ends_with("auth-d1.json"));
-        assert!(state_clear(None, None, false).is_err());
-        assert_eq!(
-            state_clear(None, Some("auth"), false).unwrap()["deleted"],
-            3
-        );
+        assert!(dispatch_state_command(&json!({"action":"state_clear"}))
+            .unwrap()
+            .is_err());
+        let cleared = dispatch_state_command(&json!({"action":"state_clear","sessionName":"auth"}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared["deleted"], 3);
+        assert!(sessions.join("auth-admin.json.json").exists());
         assert!(sessions.join("auth-admin.d1.json").exists());
         assert!(sessions.join("auth-admin-d1.json").exists());
         assert!(sessions.join("other-d1.json").exists());

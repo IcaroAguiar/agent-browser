@@ -3101,7 +3101,8 @@ Operations:
   list                               List saved state files
   show <filename>                    Show state summary
   rename <old-name> <new-name>       Rename state file
-  clear [session-name] [--all]       Clear saved states
+  clear <session-name>               Clear saved states for one session name
+  clear --all                        Clear all saved states
   clean --older-than <days>          Delete expired state files
 
 Automatic State Persistence:
