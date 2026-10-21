@@ -37,6 +37,7 @@ pub struct FirefoxProcess {
     pub bidi_url: String,
     pub devtools: DevtoolsEndpoint,
     pub profile_dir: PathBuf,
+    socket_dir: Option<PathBuf>,
     tail: Arc<Mutex<VecDeque<String>>>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
@@ -173,25 +174,42 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     b.create(dir)
 }
 
+#[cfg(windows)]
+fn devtools_endpoint(
+    _profile_dir: &Path,
+) -> Result<(DevtoolsEndpoint, String, Option<PathBuf>), String> {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map_err(|e| format!("Failed to reserve a DevTools port: {e}"))?
+        .port();
+    Ok((DevtoolsEndpoint::Port(port), port.to_string(), None))
+}
+
+#[cfg(not(windows))]
+fn devtools_endpoint(
+    profile_dir: &Path,
+) -> Result<(DevtoolsEndpoint, String, Option<PathBuf>), String> {
+    let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
+    let dir = Path::new("/tmp").join(format!("abff-{id}"));
+    if create_private_dir(&dir).is_ok() {
+        let sock = dir.join("s");
+        let arg = sock.to_string_lossy().into_owned();
+        return Ok((DevtoolsEndpoint::Unix(sock), arg, Some(dir)));
+    }
+    let sock = profile_dir.join("rdp.sock");
+    let arg = sock.to_string_lossy().into_owned();
+    Ok((DevtoolsEndpoint::Unix(sock), arg, None))
+}
+
 fn prepare(
     path: &Path,
     headless: bool,
     profile_dir: &Path,
     download_path: Option<&str>,
-) -> Result<(DevtoolsEndpoint, Child), String> {
+) -> Result<(DevtoolsEndpoint, Option<PathBuf>, Child), String> {
     std::fs::write(profile_dir.join("user.js"), user_js(download_path))
         .map_err(|e| format!("Failed to write Firefox profile: {e}"))?;
-    let (devtools, rdp) = if cfg!(windows) {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|l| l.local_addr())
-            .map_err(|e| format!("Failed to reserve a DevTools port: {e}"))?
-            .port();
-        (DevtoolsEndpoint::Port(port), port.to_string())
-    } else {
-        let sock = profile_dir.join("rdp.sock");
-        let arg = sock.to_string_lossy().into_owned();
-        (DevtoolsEndpoint::Unix(sock), arg)
-    };
+    let (devtools, rdp, socket_dir) = devtools_endpoint(profile_dir)?;
     let mut args: Vec<String> = Vec::new();
     if headless {
         args.push("--headless".into());
@@ -209,7 +227,12 @@ fn prepare(
         profile_dir.to_string_lossy().into_owned(),
     ]);
     args.extend(["-no-remote".into(), "about:blank".into()]);
-    Ok((devtools, spawn(path, &args, headless)?))
+    let child = spawn(path, &args, headless).inspect_err(|_| {
+        if let Some(dir) = &socket_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    })?;
+    Ok((devtools, socket_dir, child))
 }
 
 impl FirefoxProcess {
@@ -224,8 +247,8 @@ impl FirefoxProcess {
         let profile_dir = std::env::temp_dir().join(format!("agent-browser-firefox-{id}"));
         create_private_dir(&profile_dir)
             .map_err(|e| format!("Failed to create Firefox profile dir: {e}"))?;
-        let (devtools, mut child) = prepare(path, headless, &profile_dir, download_path)
-            .inspect_err(|_| {
+        let (devtools, socket_dir, mut child) =
+            prepare(path, headless, &profile_dir, download_path).inspect_err(|_| {
                 let _ = std::fs::remove_dir_all(&profile_dir);
             })?;
         let stderr: Option<Box<dyn Read + Send>> = child.stderr.take().map(|s| Box::new(s) as _);
@@ -251,6 +274,7 @@ impl FirefoxProcess {
             bidi_url: String::new(),
             devtools,
             profile_dir,
+            socket_dir,
             tail,
             reader,
         };
@@ -305,12 +329,19 @@ impl FirefoxProcess {
 impl Drop for FirefoxProcess {
     fn drop(&mut self) {
         self.kill();
-        for _ in 0..3 {
-            if std::fs::remove_dir_all(&self.profile_dir).is_ok() || !self.profile_dir.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
+        remove_private_dir(&self.profile_dir);
+        if let Some(dir) = &self.socket_dir {
+            remove_private_dir(dir);
         }
+    }
+}
+
+fn remove_private_dir(dir: &Path) {
+    for _ in 0..3 {
+        if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -454,6 +485,31 @@ mod tests {
             .starts_with("agent-browser-firefox-"));
         drop(p);
         assert!(!profile.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn long_tmpdir_profile_yields_short_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let long_profile = dir.path().join("t".repeat(150)).join("profile");
+        std::fs::create_dir_all(&long_profile).unwrap();
+        let (endpoint, _arg, socket_dir) = devtools_endpoint(&long_profile).unwrap();
+        let DevtoolsEndpoint::Unix(sock) = endpoint else {
+            panic!("expected a unix socket endpoint");
+        };
+        assert!(
+            sock.as_os_str().len() < 100,
+            "socket path too long: {}",
+            sock.display()
+        );
+        let socket_dir = socket_dir.unwrap();
+        assert!(socket_dir.starts_with("/tmp"));
+        assert!(socket_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("abff-"));
+        std::fs::remove_dir_all(socket_dir).unwrap();
     }
 
     #[cfg(unix)]
