@@ -9,6 +9,7 @@ use super::cdp::types::*;
 use super::element::RefMap;
 
 const ANNOTATION_OVERLAY_ID: &str = "__agent_browser_annotations__";
+const ANNOTATE_OBJECT_GROUP: &str = "agent-browser-annotate";
 
 #[derive(Debug, Clone)]
 struct Rect {
@@ -286,7 +287,7 @@ async fn collect_annotations(
                 "DOM.resolveNode",
                 Some(serde_json::json!({
                     "backendNodeId": backend_node_id,
-                    "objectGroup": "agent-browser-annotate"
+                    "objectGroup": ANNOTATE_OBJECT_GROUP
                 })),
                 Some(session_id),
             )
@@ -310,10 +311,6 @@ async fn collect_annotations(
         }
     }
 
-    if resolved.is_empty() {
-        return Ok(annotations);
-    }
-
     // Batch-get bounding rects for all resolved elements using concurrent CDP calls.
     let rect_futures: Vec<_> = resolved
         .iter()
@@ -321,6 +318,13 @@ async fn collect_annotations(
         .collect();
 
     let rect_results = futures_util::future::join_all(rect_futures).await;
+    let _ = client
+        .send_command(
+            "Runtime.releaseObjectGroup",
+            Some(serde_json::json!({ "objectGroup": ANNOTATE_OBJECT_GROUP })),
+            Some(session_id),
+        )
+        .await;
 
     for (i, rect_result) in rect_results.into_iter().enumerate() {
         let rect = match rect_result {

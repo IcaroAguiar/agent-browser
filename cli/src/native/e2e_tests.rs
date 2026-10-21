@@ -6218,6 +6218,70 @@ async fn e2e_screenshot_annotate_viewport_only() {
     assert_success(&run_cmd(&mut state, json!({ "action": "close" })).await);
 }
 
+/// Verifies that `screenshot --annotate --full` releases the DOM handles it resolves, so an
+/// element removed from the page afterwards can still be garbage collected. The short sleep lets
+/// the task that created the WeakRef finish, since its target stays alive until then.
+#[tokio::test]
+#[ignore]
+async fn e2e_screenshot_annotate_releases_node_handles() {
+    let mut state = DaemonState::new();
+
+    assert_success(&run_cmd(&mut state, json!({ "action": "launch", "headless": true })).await);
+    assert_success(
+        &run_cmd(
+            &mut state,
+            json!({ "action": "setcontent", "html": "<button id=\"b\">Save</button><a href=\"#x\">Docs</a>" }),
+        )
+        .await,
+    );
+    assert_success(
+        &run_cmd(
+            &mut state,
+            json!({ "action": "snapshot", "interactive": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &run_cmd(
+            &mut state,
+            json!({ "action": "screenshot", "annotate": true, "fullPage": true }),
+        )
+        .await,
+    );
+    assert_success(
+        &run_cmd(
+            &mut state,
+            json!({ "action": "evaluate", "script": "globalThis.__ref = new WeakRef(document.getElementById('b')); document.getElementById('b').remove(); true" }),
+        )
+        .await,
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    {
+        let browser = state.browser.as_ref().unwrap();
+        let session_id = browser.active_session_id().unwrap().to_string();
+        for _ in 0..3 {
+            browser
+                .client
+                .send_command("HeapProfiler.collectGarbage", None, Some(&session_id))
+                .await
+                .unwrap();
+        }
+    }
+
+    let resp = run_cmd(
+        &mut state,
+        json!({ "action": "evaluate", "script": "__ref.deref() === undefined" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(
+        get_data(&resp)["result"],
+        true,
+        "the annotated button stayed alive after it was removed"
+    );
+}
+
 /// Viewport annotate must stay bounded and correct when the page tampers with array builtins, and must label
 /// controls inside closed shadow roots and the browser's own date-input controls.
 #[tokio::test]
