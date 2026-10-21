@@ -2049,7 +2049,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         json!({
             "type": "array",
             "items": { "type": "string" },
-            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura and --executable-path, preserving full CLI parity. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
+            "description": "Advanced: extra CLI arguments, including --engine chrome|lightpanda|obscura. Global flags that change network, file, policy, or host access (such as --allowed-domains, --executable-path, --args, --config) are rejected; set them in the MCP server environment or config. Obscura is experimental and rejects --proxy-bypass (including resolved config/environment settings). Explicit Obscura launches send this invocation's resolved bypass setting even to an existing daemon."
         }),
     );
     props.insert(
@@ -2496,12 +2496,56 @@ fn call_cli_tool(
     Ok(tool_result_from_run(run))
 }
 
+/// Global flags an MCP caller may pass in extraArgs; every other global flag must come from the server's environment or config.
+const MCP_EXTRA_ARGS_GLOBALS: &[&str] = &[
+    "--json",
+    "--headed",
+    "--webgpu",
+    "--no-webmcp",
+    "--debug",
+    "--hide-scrollbars",
+    "--annotate",
+    "--pin-tab",
+    "--no-pin-tab",
+    "-v",
+    "--verbose",
+    "-q",
+    "--quiet",
+    "--offline",
+    "--quick",
+    "--session",
+    "--namespace",
+    "--idle-timeout",
+    "--restore",
+    "--restore-save",
+    "--restore-check-url",
+    "--restore-check-text",
+    "--restore-check-fn",
+    "--device",
+    "--user-agent",
+    "--color-scheme",
+    "--engine",
+    "--input-mode",
+    "--screenshot-quality",
+    "--screenshot-format",
+];
+
 fn cli_tool_args(
     arguments: &Value,
     command_args: Vec<String>,
     session: Option<&str>,
 ) -> Result<Vec<String>, ProtocolError> {
     let extra_args = optional_string_array(arguments, "extraArgs")?.unwrap_or_default();
+    for token in &extra_args {
+        let name = token.split('=').next().unwrap_or(token);
+        let global = crate::flags::clean_args(&[name.to_string()]).is_empty();
+        if global && !MCP_EXTRA_ARGS_GLOBALS.contains(&name) {
+            return Err(ProtocolError::invalid_params(format!(
+                "extraArgs may not set {}; configure it in the MCP server's environment or config",
+                name
+            )));
+        }
+    }
     let mut args = vec!["--json".to_string()];
     append_common_global_args(&mut args, arguments, session)?;
     args.extend(command_args);
@@ -3917,6 +3961,14 @@ fn append_common_global_args(
     }
     if let Some(domains) = optional_string_array(arguments, "allowedDomains")? {
         if !domains.is_empty() {
+            if env::var_os("AGENT_BROWSER_ALLOWED_DOMAINS").is_some()
+                || crate::flags::load_config(&[])
+                    .is_ok_and(|c| c.allowed_domains.is_some_and(|d| !d.is_empty()))
+            {
+                return Err(ProtocolError::invalid_params(
+                    "allowedDomains is already set in the MCP server's environment or config",
+                ));
+            }
             args.push("--allowed-domains".to_string());
             args.push(domains.join(","));
         }
@@ -4379,14 +4431,20 @@ mod tests {
 
     #[test]
     fn open_uses_cli_headless_selection_with_custom_windows_chrome() {
-        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_HEADED"]);
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_HEADED",
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+        ]);
         guard.set("AGENT_BROWSER_HEADED", "true");
+        guard.set(
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+            "C:\\Chrome for Testing\\chrome.exe",
+        );
         // An MCP caller can explicitly select the headless/private-desktop
         // launch path even when the user's default is headed.
         let arguments = json!({
             "headed": false,
-            "url": "https://example.com",
-            "extraArgs": ["--executable-path", "C:\\Chrome for Testing\\chrome.exe"]
+            "url": "https://example.com"
         });
         let args = cli_tool_args(&arguments, open_args(&arguments).unwrap(), None).unwrap();
         let flags = crate::flags::parse_flags(&args);
@@ -4802,16 +4860,14 @@ mod tests {
 
     #[test]
     fn obscura_extra_args_use_the_canonical_cli_parser() {
-        let arguments = json!({"extraArgs": [
-            "--engine", "obscura", "--executable-path", "/tmp/obscura",
-            "--proxy-bypass", "localhost"
-        ]});
-        let mut args = vec!["open".to_string(), "https://example.com".to_string()];
-        args.extend(
-            optional_string_array(&arguments, "extraArgs")
-                .unwrap()
-                .unwrap(),
-        );
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_EXECUTABLE_PATH",
+            "AGENT_BROWSER_PROXY_BYPASS",
+        ]);
+        guard.set("AGENT_BROWSER_EXECUTABLE_PATH", "/tmp/obscura");
+        guard.set("AGENT_BROWSER_PROXY_BYPASS", "localhost");
+        let arguments = json!({"extraArgs": ["--engine", "obscura"]});
+        let args = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap();
         let flags = crate::flags::parse_flags(&args);
         assert_eq!(flags.engine.as_deref(), Some("obscura"));
         assert_eq!(flags.executable_path.as_deref(), Some("/tmp/obscura"));
@@ -4832,6 +4888,34 @@ mod tests {
             crate::attach_obscura_proxy_bypass(&mut launch, &flags);
             assert_eq!(launch, json!({"action": "launch"}));
         }
+    }
+
+    #[test]
+    fn extra_args_reject_operator_owned_globals() {
+        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        for bad in [
+            vec!["--allowed-domains", "x"],
+            vec!["--action-policy", "/p"],
+            vec!["--confirm-actions", "none"],
+            vec!["--executable-path", "/bin/sh"],
+            vec!["--args", "--foo"],
+            vec!["--config", "/c.json"],
+            vec!["--allowed-domains=x"],
+        ] {
+            let arguments = json!({ "extraArgs": bad });
+            let error = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap_err();
+            assert!(error.message.contains("extraArgs may not set"), "{:?}", bad);
+        }
+        for ok in [vec!["--engine", "obscura"], vec!["--full"], vec!["-i"]] {
+            let arguments = json!({ "extraArgs": ok });
+            assert!(cli_tool_args(&arguments, vec!["open".to_string()], None).is_ok());
+        }
+        guard.set("AGENT_BROWSER_ALLOWED_DOMAINS", "localhost");
+        let mut args = Vec::new();
+        let error =
+            append_common_global_args(&mut args, &json!({ "allowedDomains": ["127.0.0.1"] }), None)
+                .unwrap_err();
+        assert!(error.message.contains("already set"));
     }
 
     #[test]
