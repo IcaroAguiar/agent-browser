@@ -1219,8 +1219,13 @@ impl DaemonState {
                 bidi: Arc::clone(&ff.bidi),
                 context: ff.context.clone(),
             });
+            let dialog = self
+                .pending_dialog
+                .as_ref()
+                .map(|d| d.session_id.as_deref());
             self.firefox_poller = live.clone().map(|live| {
-                bidi::stream::spawn_poller(live, Arc::clone(server), self.pending_dialog.is_some())
+                let paused = dialog == Some(Some(live.context.as_str()));
+                bidi::stream::spawn_poller(live, Arc::clone(server), paused)
             });
             server.set_firefox_live(live).await;
             let sc = server.is_screencasting().await;
@@ -2637,6 +2642,7 @@ async fn close_active_provider_session(state: &mut DaemonState) -> Result<(), St
 
 pub(crate) async fn close_current_browser(state: &mut DaemonState) -> Result<(), String> {
     if let Some(ff) = state.firefox.take() {
+        state.firefox_poller = None;
         state.pending_dialog = None;
         ff.close().await;
     }
@@ -9788,6 +9794,7 @@ async fn handle_stream_disable(state: &mut DaemonState) -> Result<Value, String>
     server.shutdown().await;
     state.stream_server = None;
     state.stream_client = None;
+    state.firefox_poller = None;
     remove_stream_file(&state.session_id)?;
     remove_engine_file(&state.session_id);
     remove_provider_file(&state.session_id);
