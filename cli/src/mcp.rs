@@ -1814,7 +1814,7 @@ fn parity_tools() -> Vec<Value> {
                 "reference": { "type": "string", "description": "npm package, scoped package, or owner/repo GitHub reference." },
                 "name": { "type": "string", "description": "Override the configured plugin name." },
                 "capabilities": string_array_schema("Capabilities to declare when manifest discovery is skipped or unavailable."),
-                "global": { "type": "boolean", "default": false, "description": "Write ~/.agent-browser/config.json instead of ./agent-browser.json." },
+                "project": { "type": "boolean", "default": false, "description": "Write ./agent-browser.json instead of ~/.agent-browser/config.json." },
                 "noManifest": { "type": "boolean", "default": false, "description": "Skip plugin.manifest discovery." }
             }),
             &["reference"],
@@ -3596,8 +3596,8 @@ fn plugin_add_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
             args.push(capability);
         }
     }
-    if optional_bool(arguments, "global")?.unwrap_or(false) {
-        args.push("--global".to_string());
+    if optional_bool(arguments, "project")?.unwrap_or(false) {
+        args.push("--project".to_string());
     }
     if optional_bool(arguments, "noManifest")?.unwrap_or(false) {
         args.push("--no-manifest".to_string());
@@ -4758,7 +4758,7 @@ mod tests {
             "reference": "@company/agent-browser-plugin-vault",
             "name": "vault",
             "capabilities": ["credential.read", "command.run"],
-            "global": true,
+            "project": true,
             "noManifest": true,
         }))
         .unwrap();
@@ -4775,7 +4775,7 @@ mod tests {
                 "credential.read",
                 "--capability",
                 "command.run",
-                "--global",
+                "--project",
                 "--no-manifest",
             ]
         );

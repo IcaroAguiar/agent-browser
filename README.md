@@ -901,11 +901,11 @@ agent-browser plugin add @company/agent-browser-plugin-vault --name vault
 agent-browser plugin add org/agent-browser-plugin-cloud-browser
 ```
 
-References are resolved by shape: `name` uses npm, `@scope/name` uses npm, and `owner/repo` uses GitHub. `plugin add` writes `./agent-browser.json` by default; use `--global` for `~/.agent-browser/config.json`.
+References are resolved by shape: `name` uses npm, `@scope/name` uses npm, and `owner/repo` uses GitHub. `plugin add` writes `~/.agent-browser/config.json` by default; use `--project` for `./agent-browser.json` (only used with `--config`).
 
 Plugin packages should support `plugin.manifest` so `plugin add` can discover their name and capabilities automatically. If a plugin does not support manifests, pass `--capability <name>` during add.
 
-Plugins can also be configured manually in `agent-browser.json`:
+Plugins can also be configured manually in `~/.agent-browser/config.json` (or a file loaded with `--config`):
 
 ```json
 {
@@ -1176,7 +1176,9 @@ Create an `agent-browser.json` file to set persistent defaults instead of repeat
 3. `AGENT_BROWSER_*` environment variables override config file values
 4. CLI flags override everything
 
-**Example `agent-browser.json`:**
+The auto-discovered `./agent-browser.json` cannot set `executablePath`, `args` or `plugins` (they are ignored with a warning); set them in `~/.agent-browser/config.json`, env vars or flags, or load the file explicitly with `--config ./agent-browser.json`.
+
+**Example config file:**
 
 ```json
 {

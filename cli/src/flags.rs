@@ -365,7 +365,7 @@ fn extract_config_path(args: &[String]) -> Option<Option<String>> {
     None
 }
 
-/// Load merged configuration; the auto-discovered project file cannot set executablePath or plugins.
+/// Load merged configuration; the auto-discovered project file cannot set executablePath, args or plugins.
 pub fn load_config(args: &[String]) -> Result<Config, String> {
     let explicit = extract_config_path(args)
         .map(|p| ("--config", p))
@@ -403,12 +403,15 @@ fn merge_project_config(user: Config, mut project: Config) -> Config {
     if project.executable_path.take().is_some() {
         ignored.push("executablePath");
     }
+    if project.args.take().is_some() {
+        ignored.push("args");
+    }
     if project.plugins.take().is_some_and(|p| !p.is_empty()) {
         ignored.push("plugins");
     }
     if !ignored.is_empty() {
         eprintln!(
-            "{} ignoring {} from ./{} (a project file cannot set what runs programs). Set them in ~/{}/{}, env vars such as AGENT_BROWSER_EXECUTABLE_PATH, CLI flags, or trust the file with --config ./{}",
+            "{} ignoring {} from ./{} (a project file cannot set what runs programs). Set them in ~/{}/{}, env vars such as AGENT_BROWSER_ARGS, CLI flags, or trust the file with --config ./{}",
             color::warning_indicator(),
             ignored.join(", "),
             PROJECT_CONFIG_FILENAME,
@@ -1816,13 +1819,14 @@ mod tests {
     }
 
     #[test]
-    fn test_project_config_cannot_set_executable_path_or_plugins() {
+    fn test_project_config_cannot_set_executable_path_args_or_plugins() {
         let user = Config {
             executable_path: Some("/user/chrome".to_string()),
             ..Config::default()
         };
         let project = Config {
             executable_path: Some("/project/chrome".to_string()),
+            args: Some("--no-sandbox".to_string()),
             plugins: Some(vec![PluginConfig {
                 name: "captcha".to_string(),
                 command: "npx".to_string(),
@@ -1833,6 +1837,7 @@ mod tests {
         };
         let merged = merge_project_config(user, project);
         assert_eq!(merged.executable_path.as_deref(), Some("/user/chrome"));
+        assert!(merged.args.is_none());
         assert!(merged.plugins.is_none());
         assert_eq!(merged.headed, Some(true));
     }

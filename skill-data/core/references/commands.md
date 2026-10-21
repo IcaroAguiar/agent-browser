@@ -339,7 +339,7 @@ agent-browser auth login <name> --username-selector <s> --password-selector <s> 
 agent-browser auth list                  # List saved auth profiles
 agent-browser auth show <name>           # Show profile metadata, no passwords
 agent-browser auth delete <name>         # Delete a saved profile
-agent-browser plugin add <ref>           # Add a plugin from npm or GitHub
+agent-browser plugin add <ref>           # Add a plugin from npm or GitHub (writes ~/.agent-browser/config.json; --project writes ./agent-browser.json)
 agent-browser plugin list                # List configured plugins
 agent-browser plugin show <name>         # Show one configured plugin
 agent-browser plugin run <name> <type> --payload <json>

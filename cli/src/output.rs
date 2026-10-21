@@ -3747,9 +3747,12 @@ Subcommands:
   show <name>              Show one configured plugin
   run <name> <type>        Run a command.run or custom plugin request
 
-Plugins are configured in agent-browser.json. A plugin entry declares a name,
-an executable command, optional args, and capabilities. Plugins run as
-external processes over the agent-browser.plugin.v1 stdio JSON protocol.
+Plugins are configured in ~/.agent-browser/config.json or a file loaded with
+--config. A plugin entry declares a name, an executable command, optional args,
+and capabilities. Plugins run as external processes over the
+agent-browser.plugin.v1 stdio JSON protocol.
+plugin add writes ~/.agent-browser/config.json by default; use --project for
+./agent-browser.json (only used with --config).
 
 Add sources:
   <name>                   npm package, e.g. agent-browser-plugin-captcha
@@ -3759,7 +3762,7 @@ Add sources:
 Add options:
   --name <name>            Override the configured plugin name
   --capability <name>      Declare a capability if the plugin has no manifest
-  --global                 Write ~/.agent-browser/config.json instead of ./agent-browser.json
+  --project                Write ./agent-browser.json instead of ~/.agent-browser/config.json
   --no-manifest            Skip plugin.manifest discovery
 
 plugin add asks the package for plugin.manifest to discover name and
@@ -4109,6 +4112,7 @@ Configuration:
 
   Use --config <path> to load a specific config file instead of the defaults.
   If --config points to a missing or invalid file, agent-browser exits with an error.
+  The auto-discovered ./agent-browser.json cannot set executablePath, args or plugins (they are ignored with a warning); set them in ~/.agent-browser/config.json, env vars or flags, or load the file explicitly with --config ./agent-browser.json.
 
   Boolean flags accept an optional true/false value to override config:
     --headed           (same as --headed true)

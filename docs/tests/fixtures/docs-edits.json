@@ -14,6 +14,42 @@
       {
         "from": "This initial implementation does not support",
         "to": "Browser trust does not support"
+      },
+      {
+        "from": "Project-level plugin entries are appended after user-level entries. If two entries use the same name, agent-browser resolves the later entry, so a project can override a user default. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape.",
+        "to": "Plugins from `~/.agent-browser/config.json` are used, and the auto-discovered `./agent-browser.json` cannot set `plugins`; load a project file explicitly with `--config` to use its plugin entries. `AGENT_BROWSER_PLUGINS` can replace config discovery with a JSON array using the same shape."
+      },
+      {
+        "from": "Project-level plugin entries are appended after user-level entries. If two entries use the same name, agent-browser resolves the later entry, so a project can override a user default. AGENT_BROWSER_PLUGINS can replace config discovery with a JSON array using the same shape.",
+        "to": "Plugins from ~/.agent-browser/config.json are used, and the auto-discovered ./agent-browser.json cannot set plugins; load a project file explicitly with --config to use its plugin entries. AGENT_BROWSER_PLUGINS can replace config discovery with a JSON array using the same shape."
+      },
+      {
+        "from": "See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create this config automatically.",
+        "to": "See [Plugins](/plugins) for the plugin author protocol and implementation examples. Use `agent-browser plugin add <ref>` to create this config automatically; it writes `~/.agent-browser/config.json` by default, and `--project` writes `./agent-browser.json` (only used with `--config`)."
+      },
+      {
+        "from": "See Plugins for the plugin author protocol and implementation examples. Use agent-browser plugin add <ref> to create this config automatically.",
+        "to": "See Plugins for the plugin author protocol and implementation examples. Use agent-browser plugin add <ref> to create this config automatically; it writes ~/.agent-browser/config.json by default, and --project writes ./agent-browser.json (only used with --config)."
+      }
+    ],
+    "/plugins": [
+      {
+        "from": "`plugin add` writes `./agent-browser.json` by default. Use `--global` to write `~/.agent-browser/config.json` instead.",
+        "to": "`plugin add` writes `~/.agent-browser/config.json` by default. Use `--project` to write `./agent-browser.json` instead (only used with `--config`)."
+      },
+      {
+        "from": "plugin add writes ./agent-browser.json by default. Use --global to write ~/.agent-browser/config.json instead.",
+        "to": "plugin add writes ~/.agent-browser/config.json by default. Use --project to write ./agent-browser.json instead (only used with --config)."
+      }
+    ],
+    "/security": [
+      {
+        "from": "Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `agent-browser.json`:",
+        "to": "Plugins run out-of-process over the `agent-browser.plugin.v1` stdio JSON protocol. Configure them in `~/.agent-browser/config.json`. The auto-discovered `./agent-browser.json` cannot set `plugins` (it is ignored with a warning); set them in `~/.agent-browser/config.json`, env vars or flags, or load the file explicitly with `--config ./agent-browser.json`."
+      },
+      {
+        "from": "Plugins run out-of-process over the agent-browser.plugin.v1 stdio JSON protocol. Configure them in agent-browser.json:",
+        "to": "Plugins run out-of-process over the agent-browser.plugin.v1 stdio JSON protocol. Configure them in ~/.agent-browser/config.json. The auto-discovered ./agent-browser.json cannot set plugins (it is ignored with a warning); set them in ~/.agent-browser/config.json, env vars or flags, or load the file explicitly with --config ./agent-browser.json."
       }
     ],
     "/proxy": [
