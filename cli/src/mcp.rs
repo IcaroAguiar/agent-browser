@@ -4892,7 +4892,15 @@ mod tests {
 
     #[test]
     fn extra_args_reject_operator_owned_globals() {
-        let guard = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CONFIG",
+            "HOME",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_CONFIG");
+        guard.set("HOME", dir.path().to_str().unwrap());
         for bad in [
             vec!["--allowed-domains", "x"],
             vec!["--action-policy", "/p"],
@@ -4937,6 +4945,15 @@ mod tests {
 
     #[test]
     fn common_global_args_include_allowed_domains() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CONFIG",
+            "HOME",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_CONFIG");
+        guard.set("HOME", dir.path().to_str().unwrap());
         let mut args = Vec::new();
 
         append_common_global_args(

@@ -3667,7 +3667,12 @@ Common tools include:
   agent_browser_close      Close the browser session
 
 Each tool has typed fields such as url, selector, text, key, and session.
-Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.
+Each tool also accepts extraArgs for per-command options and display or emulation
+flags such as --engine. Global flags that change network, file, policy, or host
+access (such as --allowed-domains, --action-policy, --executable-path, --args,
+and --config) are rejected in extraArgs and must be set in the MCP server's
+environment or config, and structured allowedDomains is rejected when the server
+already sets allowed domains.
 Tool discovery is paginated and includes read-only/open-world annotations so
 modern MCP clients can load the large typed surface incrementally.
 Use agent_browser_snapshot after navigation to get fresh refs before clicking.
