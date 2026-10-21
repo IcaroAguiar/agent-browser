@@ -29,6 +29,9 @@ pub struct FirefoxSession {
     pub accessibility_actor: String,
     /// Active top-level browsing context (tab) id.
     pub context: String,
+    /// Stable `t<N>` ids keyed by BiDi context; assigned on first sight and never reused.
+    pub tab_ids: HashMap<String, u32>,
+    next_tab_id: u32,
     /// Durable ref ids keyed by `(context, sharedId)`; reset when a document changes.
     pub refs: HashMap<(String, String), i64>,
     pub tab_labels: HashMap<String, String>,
@@ -128,11 +131,24 @@ impl FirefoxSession {
             bidi,
             rdp,
             accessibility_actor,
+            tab_ids: HashMap::from([(context.clone(), 1)]),
+            next_tab_id: 2,
             context,
             refs: HashMap::new(),
             tab_labels: HashMap::new(),
             events,
         })
+    }
+
+    /// Returns the stable `t<N>` id for `context`, assigning the next id the first time it is seen.
+    pub fn tab_id(&mut self, context: &str) -> u32 {
+        if let Some(id) = self.tab_ids.get(context) {
+            return *id;
+        }
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.tab_ids.insert(context.to_string(), id);
+        id
     }
 
     /// True once the Firefox process has exited.
@@ -295,6 +311,8 @@ pub(crate) mod tests {
             rdp,
             accessibility_actor: "acc".into(),
             context: "ctx-active".into(),
+            tab_ids: HashMap::from([("ctx-active".into(), 1)]),
+            next_tab_id: 2,
             refs: HashMap::new(),
             tab_labels: HashMap::new(),
             events,
@@ -312,6 +330,15 @@ pub(crate) mod tests {
         assert_eq!(socks["socksProxy"], "proxy:1080");
         assert_eq!(socks["socksVersion"], 5);
         assert!(socks.get("noProxy").is_none());
+    }
+
+    #[tokio::test]
+    async fn tab_ids_are_stable_and_never_reused() {
+        let (mut s, _tx, _) = fake_session().await;
+        assert_eq!(s.tab_id("ctx-active"), 1);
+        assert_eq!(s.tab_id("ctx-new"), 2);
+        assert_eq!(s.tab_id("ctx-active"), 1);
+        assert_eq!(s.tab_id("ctx-later"), 3);
     }
 
     #[test]
