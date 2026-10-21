@@ -798,7 +798,7 @@ agent-browser --profile "Work" open https://app.example.com
 AGENT_BROWSER_PROFILE=Default agent-browser open https://gmail.com
 ```
 
-This copies your Chrome profile to a temp directory (read-only snapshot, no changes to your original profile), so the browser launches with your existing cookies and sessions. Saved tabs and windows are not carried over, and Chrome's crash-restore prompt is suppressed.
+This copies your Chrome profile to a temp directory (read-only snapshot, no changes to your original profile), so the browser launches with your existing cookies and sessions.
 
 > **Note:** On Windows, close Chrome before using `--profile <name>` if Chrome is running, as some profile files may be locked.
 
