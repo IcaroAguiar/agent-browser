@@ -493,8 +493,13 @@ fn first_chat_command(command: &str) -> &str {
 }
 
 /// Builds CLI arguments for one chat tool call, blocking commands outside the
-/// chat allowlist.
-fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String> {
+/// chat allowlist. With `pin_session`, a `--session` the model supplies is
+/// dropped so the call stays in the chat's own session.
+fn chat_command_args(
+    session: &str,
+    command: &str,
+    pin_session: bool,
+) -> Result<Vec<String>, String> {
     let single = first_chat_command(command);
     let stripped = single.strip_prefix("agent-browser ").unwrap_or(single);
     let words = crate::commands::shell_words_split(stripped);
@@ -506,6 +511,10 @@ fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String
     while i < words.len() {
         if ALLOWED_GLOBAL_FLAGS.contains(&words[i].as_str()) {
             if words[i] == "--session" {
+                if pin_session {
+                    i += 2;
+                    continue;
+                }
                 has_session_flag = true;
             }
             global_flags.push(words[i].clone());
@@ -539,8 +548,8 @@ fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String
     Ok(args)
 }
 
-pub(crate) async fn execute_chat_tool(session: &str, command: &str) -> String {
-    let args = match chat_command_args(session, command) {
+pub(crate) async fn execute_chat_tool(session: &str, command: &str, pin_session: bool) -> String {
+    let args = match chat_command_args(session, command, pin_session) {
         Ok(args) => args,
         Err(e) => return e,
     };
@@ -979,7 +988,7 @@ pub(super) async fn handle_chat_request(
 
             let result = match tokio::time::timeout(
                 TOOL_TIMEOUT,
-                execute_chat_tool(&session, command),
+                execute_chat_tool(&session, command, true),
             )
             .await
             {
@@ -1058,7 +1067,7 @@ mod tests {
     }
 
     fn parse_chat(command: &str) -> (crate::flags::Flags, Value) {
-        let args = chat_command_args("chat-test", command).unwrap();
+        let args = chat_command_args("chat-test", command, false).unwrap();
         let flags = crate::flags::parse_flags(&args);
         let parsed =
             crate::commands::parse_command(&crate::flags::clean_args(&args), &flags).unwrap();
@@ -1078,16 +1087,47 @@ mod tests {
             assert_eq!(parsed["params"]["q"], "a; b && c", "{command}");
         }
         assert_eq!(
-            chat_command_args("s", r"fill @e1 a\;b\&\&c; close").unwrap(),
+            chat_command_args("s", r"fill @e1 a\;b\&\&c; close", false).unwrap(),
             ["--session", "s", "fill", "@e1", "a;b&&c"]
         );
         assert_eq!(
-            chat_command_args("s", "fill @e1 a#b(c)$(d)`e`").unwrap(),
+            chat_command_args("s", "fill @e1 a#b(c)$(d)`e`", false).unwrap(),
             ["--session", "s", "fill", "@e1", "a#b(c)$(d)`e`"]
         );
         assert_eq!(
-            chat_command_args("s", "open example.com; close").unwrap(),
+            chat_command_args("s", "open example.com; close", false).unwrap(),
             ["--session", "s", "open", "example.com"]
+        );
+    }
+
+    #[test]
+    fn chat_pins_the_session_only_when_asked() {
+        let command = "--session other --engine chrome open example.com";
+        assert_eq!(
+            chat_command_args("work", command, true).unwrap(),
+            [
+                "--session",
+                "work",
+                "--engine",
+                "chrome",
+                "open",
+                "example.com"
+            ]
+        );
+        assert_eq!(
+            chat_command_args("work", command, false).unwrap(),
+            [
+                "--session",
+                "other",
+                "--engine",
+                "chrome",
+                "open",
+                "example.com"
+            ]
+        );
+        assert_eq!(
+            chat_command_args("work", "open example.com --session", true).unwrap(),
+            ["--session", "work", "open", "example.com"]
         );
     }
 

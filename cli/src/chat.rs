@@ -349,13 +349,15 @@ async fn run_chat_turn(
                 eprintln!("{}", color::dim(&format!("> {}", command)));
             }
 
-            let result =
-                match tokio::time::timeout(tool_timeout, chat::execute_chat_tool(session, command))
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
-                };
+            let result = match tokio::time::timeout(
+                tool_timeout,
+                chat::execute_chat_tool(session, command, false),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => "Tool execution timed out after 60 seconds.".to_string(),
+            };
 
             if !json_mode && verbosity == Verbosity::Verbose {
                 for line in result.lines() {
