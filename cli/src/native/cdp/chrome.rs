@@ -1477,6 +1477,7 @@ const PROFILE_COPY_EXCLUDE_DIRS: &[&str] = &[
 /// The copy is best-effort: individual file failures (e.g., `SingletonLock`)
 /// are skipped with a warning. If the source profile directory is missing or
 /// the temp dir cannot be created, returns an error after cleaning up.
+/// The copied `Sessions` dir is dropped so saved tabs are not restored.
 pub fn copy_chrome_profile(
     user_data_dir: &Path,
     profile_directory: &str,
@@ -1511,6 +1512,8 @@ pub fn copy_chrome_profile(
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(format!("Failed to copy profile: {}", e));
     }
+
+    let _ = std::fs::remove_dir_all(dst_profile.join("Sessions"));
 
     Ok(temp_dir)
 }
@@ -2718,6 +2721,13 @@ exec sleep 60
         create_fake_local_state(&src, &[("Default", "Person 1")]);
         create_fake_profile(&src, "Default");
 
+        let prefs_bytes = b"{\"profile\":{\"exit_type\":\"Crashed\"";
+        std::fs::create_dir_all(src.join("Default/Sessions")).unwrap();
+        std::fs::write(src.join("Default/Sessions/Session_1"), "session-one").unwrap();
+        std::fs::create_dir_all(src.join("Default/Local Storage/Sessions")).unwrap();
+        std::fs::write(src.join("Default/Local Storage/Sessions/keep"), "keep-me").unwrap();
+        std::fs::write(src.join("Default/Preferences"), prefs_bytes).unwrap();
+
         let temp_path = copy_chrome_profile(&src, "Default").unwrap();
         let temp = TempDir(temp_path);
 
@@ -2733,6 +2743,17 @@ exec sleep 60
             "fake-leveldb"
         );
         assert!(!temp.join("Default/Cache").exists());
+        assert!(!temp.join("Default/Sessions").exists());
+        assert!(temp.join("Default/Local Storage/Sessions/keep").is_file());
+        assert_eq!(
+            std::fs::read(temp.join("Default/Preferences")).unwrap(),
+            prefs_bytes
+        );
+        assert!(src.join("Default/Sessions/Session_1").is_file());
+        assert_eq!(
+            std::fs::read(src.join("Default/Preferences")).unwrap(),
+            prefs_bytes
+        );
     }
 
     #[test]
