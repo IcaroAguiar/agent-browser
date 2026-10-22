@@ -3615,6 +3615,7 @@ webmcp list <tool> --frame <frame-id> --json before invoking it in that frame.
 Chat runs in the session you select and cannot create or switch sessions. To use
 another engine, open the session first with
 agent-browser --session <name> --engine <engine> open <url>, then pass --session <name> to chat.
+Chat commands cannot set global flags other than --json and --annotate.
 
 Global Options:
   --json                 Structured JSON output per turn

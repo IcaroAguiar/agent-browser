@@ -1159,7 +1159,7 @@ agent-browser --model openai/gpt-4o chat "take a screenshot" # Override model
 
 The `chat` command translates natural language instructions into agent-browser commands, executes them, and streams the AI response. In interactive mode, type `quit` to exit. Use `--json` for structured output suitable for agent consumption.
 
-Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted argument is kept as text, so JSON parameters can contain them. Chat can load bundled skills with `skills get <name>` and use page WebMCP tools: it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`. Chat runs in the selected session and cannot create or switch sessions; use New Session in the dashboard for a new one.
+Chat runs one agent-browser command per tool call. A `;` or `&&` inside a quoted argument is kept as text, so JSON parameters can contain them. Chat can load bundled skills with `skills get <name>` and use page WebMCP tools: it fetches a tool's input schema with `webmcp list <tool> --frame <frame-id> --json`, then calls `webmcp invoke` with the same `--frame`. Chat runs in the selected session and cannot create or switch sessions; use New Session in the dashboard for a new one. Chat commands cannot set global flags other than `--json` and `--annotate`.
 
 **Dashboard usage:**
 

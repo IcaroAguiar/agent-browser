@@ -467,6 +467,8 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "skills",
 ];
 
+const CHAT_GLOBAL_FLAGS: &[&str] = &["--json", "--annotate"];
+
 fn is_allowed_chat_command(command: &str) -> bool {
     ALLOWED_COMMANDS.contains(&command)
 }
@@ -494,21 +496,27 @@ fn first_chat_command(command: &str) -> &str {
     command.trim()
 }
 
-/// Builds CLI arguments for one chat tool call, blocking commands outside the
-/// chat allowlist.
+/// Builds CLI arguments for one chat tool call in `session`, blocking commands
+/// outside the chat allowlist and global flags other than `CHAT_GLOBAL_FLAGS`.
 fn chat_command_args(session: &str, command: &str) -> Result<Vec<String>, String> {
     let single = first_chat_command(command);
     let stripped = single.strip_prefix("agent-browser ").unwrap_or(single);
     let words = crate::commands::shell_words_split(stripped);
 
-    let mut args = vec!["--session".to_string(), session.to_string()];
-    args.extend(words);
-    if crate::flags::parse_flags(&args).session != session {
+    let rest: Vec<String> = words
+        .iter()
+        .filter(|w| !CHAT_GLOBAL_FLAGS.contains(&w.as_str()))
+        .cloned()
+        .collect();
+    if crate::flags::clean_args(&rest) != rest {
         return Err(format!(
-            "Blocked: this chat is bound to session '{}'. --session is not available.",
+            "Blocked: this chat is bound to session '{}'. Global flags such as --session are not available; only --json and --annotate are allowed.",
             session
         ));
     }
+
+    let mut args = vec!["--session".to_string(), session.to_string()];
+    args.extend(words);
 
     let first_cmd = args.get(2).map(|s| s.as_str()).unwrap_or("");
     if !is_allowed_chat_command(first_cmd) {
@@ -1088,10 +1096,15 @@ mod tests {
         for command in [
             "open example.com --session other",
             "--session other open example.com",
+            "--namespace other open example.com",
+            "open example.com --config /nonexistent",
+            "open example.com --allow-file-access",
         ] {
             let err = chat_command_args("s", command).unwrap_err();
             assert!(err.contains("bound to session 's'"), "{command}: {err}");
         }
+        assert!(chat_command_args("s", "webmcp list t --frame f --json").is_ok());
+        assert!(chat_command_args("s", "screenshot --annotate").is_ok());
     }
 
     #[test]
