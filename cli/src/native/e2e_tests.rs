@@ -14827,3 +14827,34 @@ async fn e2e_firefox_emulation() {
     );
     firefox_close(&mut state).await;
 }
+
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_full_page_screenshot_larger_than_64mb() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(
+        &mut state,
+        "const c = document.createElement('canvas'); c.width = 1280; c.height = 16000; \
+         const x = c.getContext('2d'); const d = x.createImageData(1280, 16000); \
+         for (let i = 0; i < d.data.length; i += 65536) crypto.getRandomValues(d.data.subarray(i, i + 65536)); \
+         for (let i = 3; i < d.data.length; i += 4) d.data[i] = 255; \
+         x.putImageData(d, 0, 0); document.body.append(c); true",
+    )
+    .await;
+    let path = tmp.path().join("full.png");
+    let shot = execute_command(
+        &json!({ "id": "full", "action": "screenshot", "fullPage": true, "path": path }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(shot["success"], json!(true), "{shot}");
+    assert!(std::fs::metadata(&path).unwrap().len() > 48 * 1024 * 1024);
+    assert_eq!(firefox_eval(&mut state, "1 + 1").await, json!(2));
+    firefox_close(&mut state).await;
+}

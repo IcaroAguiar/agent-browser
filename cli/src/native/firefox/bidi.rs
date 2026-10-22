@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -35,7 +36,12 @@ impl Drop for BidiClient {
 impl BidiClient {
     /// Connects to a BiDi WebSocket URL and starts the reader task.
     pub async fn connect(url: &str) -> Result<Self, String> {
-        let (ws, _) = tokio_tungstenite::connect_async(url)
+        let config = WebSocketConfig {
+            max_message_size: None,
+            max_frame_size: None,
+            ..Default::default()
+        };
+        let (ws, _) = tokio_tungstenite::connect_async_with_config(url, Some(config), false)
             .await
             .map_err(|e| format!("BiDi connect failed: {e}"))?;
         let (sink, mut stream) = ws.split();
@@ -103,6 +109,10 @@ impl BidiClient {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
+        if self.reader.is_finished() {
+            self.pending.lock().unwrap().remove(&id);
+            return Err("BiDi connection closed".to_string());
+        }
         let body = json!({"id": id, "method": method, "params": params}).to_string();
         if let Err(e) = self.sink.lock().await.send(Message::Text(body)).await {
             self.pending.lock().unwrap().remove(&id);
