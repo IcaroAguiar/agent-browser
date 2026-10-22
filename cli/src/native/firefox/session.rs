@@ -86,7 +86,8 @@ async fn connect_devtools_loop(endpoint: &DevtoolsEndpoint) -> Result<RdpClient,
 
 impl FirefoxSession {
     /// Finds and launches Firefox, opens the BiDi session and enables the accessibility actor.
-    pub async fn launch(options: &LaunchOptions) -> Result<Self, String> {
+    /// With `auto_dialog`, Firefox itself accepts alert and beforeunload prompts, like Chrome's default.
+    pub async fn launch(options: &LaunchOptions, auto_dialog: bool) -> Result<Self, String> {
         let path = find_firefox(options.executable_path.as_deref())?;
         let (headless, download) = (options.headless, options.download_path.clone());
         let process = tokio::task::spawn_blocking(move || {
@@ -104,7 +105,11 @@ impl FirefoxSession {
         let events = bidi.subscribe();
         let mut caps = json!({
             "acceptInsecureCerts": options.ignore_https_errors,
-            "unhandledPromptBehavior": {"default": "ignore"},
+            "unhandledPromptBehavior": if auto_dialog {
+                json!({"default": "ignore", "alert": "accept", "beforeUnload": "accept"})
+            } else {
+                json!({"default": "ignore"})
+            },
         });
         if let Some(proxy) = options.proxy.as_deref() {
             caps["proxy"] = proxy_capability(proxy, options.proxy_bypass.as_deref());
@@ -200,6 +205,7 @@ impl FirefoxSession {
                 r = &mut fut => return r.map(Some),
                 e = events.recv() => match e {
                     Ok(e) if e["method"] == "browsingContext.userPromptOpened"
+                        && e["params"]["handler"] != "accept"
                         && e["params"]["context"] == self.context.as_str() => return Ok(None),
                     Err(broadcast::error::RecvError::Closed) => return fut.await.map(Some),
                     _ => {}
@@ -261,7 +267,7 @@ impl FirefoxSession {
 fn apply_event(e: &Value, dialog: &mut Option<PendingDialog>) {
     let p = &e["params"];
     match e["method"].as_str() {
-        Some("browsingContext.userPromptOpened") => {
+        Some("browsingContext.userPromptOpened") if p["handler"] != "accept" => {
             *dialog = Some(PendingDialog {
                 dialog_type: p["type"].as_str().unwrap_or("alert").to_string(),
                 message: p["message"].as_str().unwrap_or("").to_string(),

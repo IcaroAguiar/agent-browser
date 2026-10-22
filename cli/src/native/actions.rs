@@ -5307,7 +5307,7 @@ async fn launch_firefox(
     }
     state.ref_map.invalidate_all_documents();
     state.reset_input_state();
-    let session = firefox::session::FirefoxSession::launch(&options).await?;
+    let session = firefox::session::FirefoxSession::launch(&options, state.auto_dialog).await?;
     state.engine = "firefox".to_string();
     write_engine_file(&state.session_id, &state.engine);
     state.launch_hash = Some(hash);
