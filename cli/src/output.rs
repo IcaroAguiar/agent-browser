@@ -3612,6 +3612,9 @@ Chat Options:
 Each tool call runs one agent-browser command. Chat can load bundled skills
 (skills get <name>) and use page WebMCP tools, fetching a tool's schema with
 webmcp list <tool> --frame <frame-id> --json before invoking it in that frame.
+Chat runs in the session you select and cannot create or switch sessions. To use
+another engine, open the session first with
+agent-browser --session <name> --engine <engine> open <url>, then pass --session <name> to chat.
 
 Global Options:
   --json                 Structured JSON output per turn
