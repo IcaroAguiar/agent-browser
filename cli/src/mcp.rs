@@ -1547,7 +1547,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STATE_LOAD,
             "State load",
-            "Load cookies and storage state.",
+            "Load cookies and storage state. Origins whose page does not stay on the saved origin are skipped and listed in skippedOrigins.",
             json!({ "path": { "type": "string" } }),
             &["path"],
         ),
