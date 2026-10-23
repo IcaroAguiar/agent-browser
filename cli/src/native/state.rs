@@ -654,7 +654,7 @@ pub fn state_clear(path: Option<&str>, name: Option<&str>, all: bool) -> Result<
         for entry in entries.flatten() {
             let path = entry.path();
             let fname = entry.file_name().to_string_lossy().to_string();
-            if is_state_file(&path) && name.is_none_or(|n| state_file_matches(&fname, n)) {
+            if is_state_file(&path) && name.is_none_or(|n| state_file_owner(&fname, n).is_some()) {
                 let _ = fs::remove_file(&path);
                 count += 1;
             }
@@ -760,19 +760,19 @@ fn state_base_name(session_name: &str, session_id: &str) -> String {
     format!("{}.{}", session_name, session_id)
 }
 
-/// True when `fname` is a state file saved under `name`: `{name}.{id}` with a non-empty id, or a legacy `{name}-{id}` whose id has no `-` or `.`.
-fn state_file_matches(fname: &str, name: &str) -> bool {
-    let Some(stem) = fname.strip_prefix(name).and_then(|rest| {
+/// How `fname` belongs to restore key `name`: `Some(true)` when only `name` can own it (`{name}.{id}`, or a legacy `{name}-{id}` with no other `-`), `Some(false)` for a legacy file another key could also own, `None` when it is not `name`'s.
+fn state_file_owner(fname: &str, name: &str) -> Option<bool> {
+    let stem = fname.strip_prefix(name).and_then(|rest| {
         [".json.enc.previous", ".json.previous", ".json.enc", ".json"]
             .iter()
             .find_map(|suffix| rest.strip_suffix(suffix))
-    }) else {
-        return false;
-    };
+    })?;
     match stem.split_at_checked(1) {
-        Some((".", id)) => !id.is_empty(),
-        Some(("-", id)) => !id.is_empty() && !id.contains(['-', '.']),
-        _ => false,
+        Some((".", id)) if !id.is_empty() => Some(true),
+        Some(("-", id)) if !id.is_empty() && !id.contains('.') => {
+            Some(!name.contains('-') && !id.contains('-'))
+        }
+        _ => None,
     }
 }
 
@@ -785,7 +785,7 @@ pub fn find_auto_state_file(session_name: &str) -> Option<String> {
     if !dir.exists() {
         return None;
     }
-    let mut best_path: Option<(String, std::time::SystemTime)> = None;
+    let mut best_path: Option<(String, (bool, std::time::SystemTime))> = None;
 
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -795,17 +795,19 @@ pub fn find_auto_state_file(session_name: &str) -> Option<String> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let is_match = state_file_matches(&fname, session_name)
-                && (fname.ends_with(".json") || fname.ends_with(".json.enc"));
-            if !is_match {
+            let Some(definite) = state_file_owner(&fname, session_name) else {
+                continue;
+            };
+            if !(fname.ends_with(".json") || fname.ends_with(".json.enc")) {
                 continue;
             }
             let modified = fs::metadata(&path)
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(std::time::UNIX_EPOCH);
-            if best_path.as_ref().is_none_or(|(_, t)| modified > *t) {
-                best_path = Some((path.to_string_lossy().to_string(), modified));
+            let rank = (definite, modified);
+            if best_path.as_ref().is_none_or(|(_, r)| rank > *r) {
+                best_path = Some((path.to_string_lossy().to_string(), rank));
             }
         }
     }
@@ -981,18 +983,32 @@ mod tests {
 
         let sessions = get_sessions_dir();
         fs::create_dir_all(&sessions).unwrap();
+        let put = |f: &str, ahead: u64| {
+            let path = sessions.join(f);
+            fs::write(&path, "{}").unwrap();
+            let when = std::time::SystemTime::now() + std::time::Duration::from_secs(ahead);
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        };
         for f in [
-            "auth.d1.json",
-            "auth-d1.json",
-            "auth.d1.json.previous",
             "auth-admin.d1.json",
-            "auth-admin-d1.json",
             "auth-admin.json.json",
             "other-d1.json",
+            "auth-admin-d1.json",
         ] {
-            fs::write(sessions.join(f), "{}").unwrap();
+            put(f, 0);
         }
-
+        put("auth-worker-one.json", 10);
+        assert!(find_auto_state_file("auth")
+            .unwrap()
+            .ends_with("auth-worker-one.json"));
+        for f in ["auth-d1.json", "auth.d1.json", "auth.d1.json.previous"] {
+            put(f, 0);
+        }
         let found = find_auto_state_file("auth").unwrap();
         assert!(found.ends_with("auth.d1.json") || found.ends_with("auth-d1.json"));
         assert!(find_auto_state_file("auth-d1").is_none());
@@ -1002,10 +1018,9 @@ mod tests {
         let cleared = dispatch_state_command(&json!({"action":"state_clear","sessionName":"auth"}))
             .unwrap()
             .unwrap();
-        assert_eq!(cleared["deleted"], 3);
+        assert_eq!(cleared["deleted"], 5);
         assert!(sessions.join("auth-admin.json.json").exists());
         assert!(sessions.join("auth-admin.d1.json").exists());
-        assert!(sessions.join("auth-admin-d1.json").exists());
         assert!(sessions.join("other-d1.json").exists());
     }
 
