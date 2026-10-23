@@ -14473,6 +14473,115 @@ async fn e2e_firefox_state_keeps_every_visited_origin() {
     firefox_close(&mut state).await;
 }
 
+/// Restore must not expose secrets to page hooks, including after a cross-origin redirect.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_state_restore_isolated_from_page_hooks() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let path = tmp.path().join("state.json");
+    let origin = fixture.url.trim_end_matches('/');
+    std::fs::write(
+        &path,
+        json!({
+            "cookies": [],
+            "origins": [{
+                "origin": origin,
+                "localStorage": [{"name": "token", "value": "synthetic-local-secret"}],
+                "sessionStorage": [{"name": "token", "value": "synthetic-session-secret"}]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let hostile_page = r#"<!doctype html><script>
+        window.stolen = [];
+        const parse = JSON.parse;
+        JSON.parse = function(payload) {
+            window.stolen.push(payload);
+            return parse(payload);
+        };
+        const setItem = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+            window.stolen.push(value);
+            return setItem.call(this, key, value);
+        };
+        window.hooksInstalled = true;
+    </script>"#;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+
+    for redirect in [false, true] {
+        assert_success(
+            &firefox_command(&mut state, json!({"id": "unroute", "action": "unroute"})).await,
+        );
+        let destination = format!("{}/restore-hook.html", fixture.other);
+        let response = if redirect {
+            json!({"status": 302, "headers": {"Location": destination}, "body": ""})
+        } else {
+            json!({"contentType": "text/html", "body": hostile_page})
+        };
+        assert_success(
+            &firefox_command(
+                &mut state,
+                json!({
+                    "id": "route-origin", "action": "route", "url": fixture.url,
+                    "response": response
+                }),
+            )
+            .await,
+        );
+        assert_success(
+            &firefox_command(
+                &mut state,
+                json!({
+                    "id": "route-destination", "action": "route", "url": destination,
+                    "response": {"contentType": "text/html", "body": hostile_page}
+                }),
+            )
+            .await,
+        );
+
+        let loaded = firefox_command(
+            &mut state,
+            json!({
+                "id": "load", "action": "state_load", "path": path.to_str().unwrap()
+            }),
+        )
+        .await;
+        if redirect {
+            assert_eq!(loaded["success"], false, "{loaded}");
+            assert!(
+                loaded["error"].as_str().unwrap().contains("landed on"),
+                "{loaded}"
+            );
+        } else {
+            assert_success(&loaded);
+        }
+        assert_eq!(
+            firefox_eval(&mut state, "window.hooksInstalled").await,
+            json!(true)
+        );
+        assert_eq!(firefox_eval(&mut state, "window.stolen").await, json!([]));
+        let storage = firefox_eval(
+            &mut state,
+            "[localStorage.getItem('token'), sessionStorage.getItem('token')]",
+        )
+        .await;
+        assert_eq!(
+            storage,
+            if redirect {
+                json!([null, null])
+            } else {
+                json!(["synthetic-local-secret", "synthetic-session-secret"])
+            }
+        );
+    }
+    firefox_close(&mut state).await;
+}
+
 /// PR3: proxy credentials are never sent to an origin that answers 401.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]

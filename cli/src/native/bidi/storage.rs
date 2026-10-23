@@ -252,11 +252,13 @@ pub async fn storage_clear(cmd: &Value, state: &mut DaemonState) -> Result<Value
     Ok(json!({ "cleared": true }))
 }
 
-const RESTORE_STORAGE_JS: &str = r#"(payload) => {
-    const p = JSON.parse(payload);
-    if (location.origin !== p.origin) {
-        throw new Error('landed on ' + location.origin + ' instead of ' + p.origin);
+// Check and write in one synchronous sandbox execution: a separate URL check would
+// race navigation, and page-owned JSON.parse or Storage methods must never see the payload.
+const RESTORE_STORAGE_JS: &str = r#"(expectedOrigin, payload) => {
+    if (location.origin !== expectedOrigin) {
+        throw new Error('landed on ' + location.origin + ' instead of ' + expectedOrigin);
     }
+    const p = JSON.parse(payload);
     for (const e of p.localStorage) localStorage.setItem(e.name, e.value);
     for (const e of p.sessionStorage) sessionStorage.setItem(e.name, e.value);
 }"#;
@@ -509,8 +511,15 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<(), 
         ff.note_visit(&nav_url);
 
         let payload = serde_json::to_string(origin).map_err(|e| e.to_string())?;
+        // A fresh sandbox also avoids reusing globals from any earlier script execution.
+        let sandbox = format!("agent-browser-restore-{}", uuid::Uuid::new_v4());
         ff.bidi
-            .call_function(&context, RESTORE_STORAGE_JS, None, vec![json!(payload)])
+            .call_function_in_sandbox(
+                &context,
+                &sandbox,
+                RESTORE_STORAGE_JS,
+                vec![json!(origin.origin), json!(payload)],
+            )
             .await
             .map_err(|e| format!("Failed to restore storage for {}: {e}", origin.origin))?;
     }
@@ -546,6 +555,61 @@ mod tests {
                 ]
             }
         })
+    }
+
+    #[tokio::test]
+    async fn restore_uses_fresh_sandboxes_and_propagates_script_errors() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let (mut ff, _tx, _) = fake_session_with(move |req| {
+            if req["method"] == "script.callFunction" {
+                let mut calls = log.lock().unwrap();
+                calls.push(req["params"].clone());
+                if calls.len() == 2 {
+                    return json!({
+                        "type": "exception",
+                        "exceptionDetails": {"text": "origin mismatch"}
+                    });
+                }
+                return json!({"type": "success", "result": {"type": "undefined"}});
+            }
+            json!({})
+        })
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.json");
+        let origin = json!({
+            "origin": "https://trusted.test",
+            "localStorage": [{"name": "token", "value": "synthetic-secret"}],
+            "sessionStorage": []
+        });
+        fs::write(
+            &path,
+            json!({"cookies": [], "origins": [origin.clone()]}).to_string(),
+        )
+        .unwrap();
+
+        load_state_path(&mut ff, path.to_str().unwrap())
+            .await
+            .unwrap();
+        let error = load_state_path(&mut ff, path.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.contains("origin mismatch"), "{error}");
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        for params in calls.iter() {
+            assert_eq!(params["target"]["context"], "ctx-active");
+            let sandbox = params["target"]["sandbox"].as_str().unwrap();
+            assert!(sandbox.starts_with("agent-browser-restore-"));
+            assert_eq!(
+                params["arguments"][0],
+                json!({"type": "string", "value": "https://trusted.test"})
+            );
+            let payload = params["arguments"][1]["value"].as_str().unwrap();
+            assert_eq!(serde_json::from_str::<Value>(payload).unwrap(), origin);
+        }
+        assert_ne!(calls[0]["target"]["sandbox"], calls[1]["target"]["sandbox"]);
     }
 
     #[tokio::test]
