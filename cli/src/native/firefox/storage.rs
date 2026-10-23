@@ -419,12 +419,12 @@ fn write_state_json(path: &str, json_str: &str) -> Result<String, String> {
         Some(key) => {
             let encrypted_path = format!("{path}.enc");
             let encrypted = encrypt_data(json_str.as_bytes(), &key)?;
-            fs::write(&encrypted_path, encrypted)
+            state::write_private(&encrypted_path, &encrypted)
                 .map_err(|e| format!("Failed to write state to {encrypted_path}: {e}"))?;
             Ok(encrypted_path)
         }
         None => {
-            fs::write(path, json_str)
+            state::write_private(path, json_str.as_bytes())
                 .map_err(|e| format!("Failed to write state to {path}: {e}"))?;
             Ok(path.to_string())
         }
@@ -450,7 +450,7 @@ pub async fn state_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
                 return Err(session_name_error(name));
             }
             let dir = state::get_sessions_dir();
-            let _ = fs::create_dir_all(&dir);
+            let _ = state::create_private_dir(&dir);
             dir.join(format!("{name}-{session_id}.json"))
                 .to_string_lossy()
                 .to_string()
@@ -470,7 +470,7 @@ pub async fn save_auto_state(
         return Err(session_name_error(session_name));
     }
     let dir = state::get_sessions_dir();
-    fs::create_dir_all(&dir)
+    state::create_private_dir(&dir)
         .map_err(|e| format!("Failed to create state directory {}: {e}", dir.display()))?;
     let path = dir
         .join(format!("{session_name}-{session_id}.json"))
