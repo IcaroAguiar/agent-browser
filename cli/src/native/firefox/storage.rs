@@ -149,18 +149,7 @@ fn command_cookie_to_bidi(cookie: &Value, current_url: Option<&str>) -> Result<V
         .map(String::from)
         .or_else(|| parsed.as_ref().and_then(|u| u.host_str().map(String::from)))
         .ok_or("Cookie requires a 'domain' or a current page URL")?;
-    let path = explicit_path
-        .map(String::from)
-        .or_else(|| {
-            parsed.as_ref().map(|u| {
-                if u.path().is_empty() {
-                    "/".to_string()
-                } else {
-                    u.path().to_string()
-                }
-            })
-        })
-        .unwrap_or_else(|| "/".to_string());
+    let path = explicit_path.unwrap_or("/").to_string();
 
     let mut out = json!({
         "name": name,

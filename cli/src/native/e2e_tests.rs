@@ -14889,3 +14889,54 @@ async fn e2e_firefox_auto_dialog() {
     assert!(state.pending_dialog.is_none());
     firefox_close(&mut state).await;
 }
+
+/// A cookie set without a path uses the RFC 6265 default-path; an explicit path stays scoped.
+#[tokio::test]
+#[ignore = "requires FIREFOX_BIN; run serially"]
+async fn e2e_firefox_cookie_default_path() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let fixture = firefox_fixture().await;
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    firefox_open(&mut state, &format!("{}one", fixture.url)).await;
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c1", "action": "cookies_set", "name": "default_path", "value": "1" }),
+    )
+    .await;
+    assert_success(&resp);
+    firefox_open(&mut state, &format!("{}two", fixture.url)).await;
+    assert!(
+        firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .is_some_and(|cookies| cookies.contains("default_path=1")),
+        "a cookie set without a path must be visible outside the page directory"
+    );
+
+    let resp = firefox_command(
+        &mut state,
+        json!({ "id": "c2", "action": "cookies_set", "name": "explicit_path", "value": "2", "path": "/one" }),
+    )
+    .await;
+    assert_success(&resp);
+    assert!(
+        !firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .is_some_and(|cookies| cookies.contains("explicit_path=2")),
+        "an explicit cookie path must stay scoped"
+    );
+    firefox_open(&mut state, &format!("{}one", fixture.url)).await;
+    assert!(
+        firefox_eval(&mut state, "document.cookie")
+            .await
+            .as_str()
+            .is_some_and(|cookies| cookies.contains("explicit_path=2")),
+        "the explicit path cookie must be visible under its path"
+    );
+    firefox_close(&mut state).await;
+}
