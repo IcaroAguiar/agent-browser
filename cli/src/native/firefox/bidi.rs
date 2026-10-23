@@ -136,10 +136,44 @@ impl BidiClient {
         this: Option<Value>,
         args: Vec<Value>,
     ) -> Result<Value, String> {
+        self.call_function_target(json!({"context": context}), js, this, args)
+            .await
+    }
+
+    /// Runs a function in a named sandbox, isolated from the page's JavaScript globals.
+    pub(crate) async fn call_function_in_sandbox(
+        &self,
+        context: &str,
+        sandbox: &str,
+        js: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, String> {
+        self.call_function_target(
+            json!({"context": context, "sandbox": sandbox}),
+            js,
+            None,
+            args,
+        )
+        .await
+    }
+
+    async fn call_function_target(
+        &self,
+        target: Value,
+        js: &str,
+        this: Option<Value>,
+        args: Vec<Value>,
+    ) -> Result<Value, String> {
         let mut params = json!({
             "functionDeclaration": js,
-            "target": {"context": context},
-            "arguments": args,
+            "target": target,
+            "arguments": args
+                .into_iter()
+                .map(|a| match a {
+                    Value::String(s) => json!({"type": "string", "value": s}),
+                    other => other,
+                })
+                .collect::<Vec<_>>(),
             "awaitPromise": true,
             "resultOwnership": "root",
         });

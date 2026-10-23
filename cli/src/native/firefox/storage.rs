@@ -479,6 +479,16 @@ pub async fn save_auto_state(
     write_state_to(ff, &path).await
 }
 
+/// Run in a BiDi sandbox so page scripts never see the payload; the origin is checked in the same call so a redirect cannot race it.
+const RESTORE_STORAGE_JS: &str = r#"(expectedOrigin, payload) => {
+    if (location.origin !== expectedOrigin) {
+        throw new Error('landed on ' + location.origin + ' instead of ' + expectedOrigin);
+    }
+    const p = JSON.parse(payload);
+    for (const e of p.localStorage) localStorage.setItem(e.name, e.value);
+    for (const e of p.sessionStorage) sessionStorage.setItem(e.name, e.value);
+}"#;
+
 /// Loads the cookies and origin storage in a `state.rs` JSON file, dropping fields BiDi
 /// does not support, like Chrome's `handle_state_load`.
 pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<String>, String> {
@@ -509,22 +519,16 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
             .await?;
         ff.refs.clear();
 
-        for entry in &origin.local_storage {
-            let js = format!(
-                "localStorage.setItem({}, {})",
-                serde_json::to_string(&entry.name).unwrap_or_default(),
-                serde_json::to_string(&entry.value).unwrap_or_default(),
-            );
-            let _ = ff.eval(&js).await;
-        }
-        for entry in &origin.session_storage {
-            let js = format!(
-                "sessionStorage.setItem({}, {})",
-                serde_json::to_string(&entry.name).unwrap_or_default(),
-                serde_json::to_string(&entry.value).unwrap_or_default(),
-            );
-            let _ = ff.eval(&js).await;
-        }
+        let payload = serde_json::to_string(origin).map_err(|e| e.to_string())?;
+        ff.bidi
+            .call_function_in_sandbox(
+                &context,
+                "agent-browser",
+                RESTORE_STORAGE_JS,
+                vec![json!(origin.origin), json!(payload)],
+            )
+            .await
+            .map_err(|e| format!("Failed to restore storage for {}: {e}", origin.origin))?;
     }
 
     Ok(Vec::new())
