@@ -2161,6 +2161,10 @@ fn main() {
     // Handle batch command: from args or stdin
     if cmd.get("action").and_then(|v| v.as_str()) == Some("batch") {
         let bail = cmd.get("bail").and_then(|v| v.as_bool()).unwrap_or(false);
+        let omit_command = cmd
+            .get("omitCommand")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let arg_commands = cmd
             .get("commands")
             .and_then(|v| v.as_array())
@@ -2171,7 +2175,7 @@ fn main() {
                     .collect::<Vec<Vec<String>>>()
             })
             .or_else(|| serde_json::from_value(cmd.get("argv")?.clone()).ok());
-        run_batch(&flags, &daemon_opts, bail, arg_commands);
+        run_batch(&flags, &daemon_opts, bail, omit_command, arg_commands);
         return;
     }
 
@@ -2268,6 +2272,7 @@ fn run_batch(
     flags: &Flags,
     daemon_opts: &DaemonOptions,
     bail: bool,
+    omit_command: bool,
     arg_commands: Option<Vec<Vec<String>>>,
 ) {
     let commands: Vec<Vec<String>> = arg_commands.unwrap_or_else(|| read_batch_stdin(flags));
@@ -2294,11 +2299,10 @@ fn run_batch(
             Err(e) => {
                 had_error = true;
                 if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.format(),
-                    }));
+                    let mut result = batch_result_identity(i, cmd_args, omit_command);
+                    result["success"] = json!(false);
+                    result["error"] = json!(e.format());
+                    results.push(result);
                     if bail {
                         break;
                     }
@@ -2335,12 +2339,10 @@ fn run_batch(
         match send_command_with_respawn(parsed, &flags.session, daemon_opts) {
             Ok(resp) => {
                 if flags.json {
-                    let mut result = json!({
-                        "command": cmd_args,
-                        "success": resp.success,
-                        "result": resp.data,
-                        "error": resp.error,
-                    });
+                    let mut result = batch_result_identity(i, cmd_args, omit_command);
+                    result["success"] = json!(resp.success);
+                    result["result"] = json!(resp.data);
+                    result["error"] = json!(resp.error);
                     // Match the single-command `Response` serialization,
                     // which only emits `code` when set (e.g. `tab_gone`).
                     // Without this, machine-readable error codes are
@@ -2373,11 +2375,10 @@ fn run_batch(
             Err(e) => {
                 had_error = true;
                 if flags.json {
-                    results.push(json!({
-                        "command": cmd_args,
-                        "success": false,
-                        "error": e.to_string(),
-                    }));
+                    let mut result = batch_result_identity(i, cmd_args, omit_command);
+                    result["success"] = json!(false);
+                    result["error"] = json!(e.to_string());
+                    results.push(result);
                     if bail {
                         break;
                     }
@@ -2400,6 +2401,18 @@ fn run_batch(
 
     if had_error {
         exit(1);
+    }
+}
+
+fn batch_result_identity(
+    index: usize,
+    command: &[String],
+    omit_command: bool,
+) -> serde_json::Value {
+    if omit_command {
+        json!({ "index": index })
+    } else {
+        json!({ "command": command })
     }
 }
 
