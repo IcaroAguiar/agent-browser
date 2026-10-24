@@ -44,6 +44,8 @@ agent-browser batch \
 
 `open` with no URL gives you a clean launch so any interception, cookies, or init scripts you register take effect on the *first* real navigation. Use for SSR-only debug (`--resource-type script`), protected-origin auth, or capturing fresh `react suspense`/`vitals` state without noise from a prior page.
 
+With `--json`, `--omit-command` replaces each `command` array with a stable zero-based `index` field on success, failure, or `--bail`; default output is unchanged. Error messages and response data remain unchanged and may contain input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
+
 ## Snapshot (page analysis)
 
 ```bash

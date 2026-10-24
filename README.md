@@ -299,7 +299,11 @@ echo '[
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
+
+echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
 ```
+
+With `--json`, `--omit-command` replaces each `command` array with a stable zero-based `index` field on success, failure, or `--bail`; default output is unchanged. Error messages and response data remain unchanged and may contain input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 
 ### Clipboard
 

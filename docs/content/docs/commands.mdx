@@ -671,6 +671,8 @@ echo '[
   ["click", "@e1"],
   ["screenshot", "result.png"]
 ]' | agent-browser batch --json
+
+echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
 ```
 
 <table>
@@ -680,8 +682,11 @@ echo '[
   <tbody>
     <tr><td><code>--bail</code></td><td>Stop on first error (default: continue all commands)</td></tr>
     <tr><td><code>--json</code></td><td>Output results as a JSON array</td></tr>
+    <tr><td><code>--omit-command</code></td><td>With <code>--json</code>, replace each <code>command</code> array with a stable zero-based <code>index</code> field</td></tr>
   </tbody>
 </table>
+
+With `--json --omit-command`, rows use a stable zero-based `index` field on success, failure, or `--bail`; default JSON output keeps the `command` field. Error messages and response data remain unchanged and may contain input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 
 ## MCP server
 

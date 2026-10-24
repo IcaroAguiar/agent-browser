@@ -2268,6 +2268,7 @@ fn read_batch_stdin(flags: &Flags) -> Vec<Vec<String>> {
     }
 }
 
+/// Runs a batch, optionally omitting command arrays without redacting errors or response data.
 fn run_batch(
     flags: &Flags,
     daemon_opts: &DaemonOptions,
