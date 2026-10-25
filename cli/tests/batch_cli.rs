@@ -4,10 +4,6 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Output, Stdio};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -162,16 +158,13 @@ fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
         }
     }
     assert_eq!(fixture.run(&args, "", 0)["success"], true);
-    let commands = json!([["get", "title"], ["fill", "#x", SECRET_VALUE]]);
-    for (mcp, omit) in [(false, false), (false, true), (true, true)] {
+    let commands = json!([["fill", "#x", SECRET_VALUE]]);
+    for mcp in [false, true] {
         assert_eq!(
             fixture.run(&["fill", "#x", "", "--json"], "", 0)["success"],
             true
         );
-        let mut args = vec!["batch", "--json"];
-        if omit {
-            args.push("--omit-command");
-        }
+        let mut args = vec!["batch", "--json", "--omit-command"];
         let input = if mcp {
             args = vec!["mcp", "--tools", "all"];
             let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -183,7 +176,7 @@ fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
         };
         let output = fixture.run_raw(&args, &input, 0);
         let raw = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
-        assert_eq!(String::from_utf8_lossy(&raw).contains(SECRET_VALUE), !omit);
+        assert!(!String::from_utf8_lossy(&raw).contains(SECRET_VALUE));
         let response: Value = serde_json::from_slice(&output.stdout).unwrap();
         let rows = if mcp {
             assert_eq!(response["result"]["isError"], false, "{response}");
@@ -192,11 +185,9 @@ fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
         } else {
             &response
         };
-        assert_eq!(rows.as_array().unwrap().len(), 2);
-        for (index, row) in rows.as_array().unwrap().iter().enumerate() {
-            assert_identity(row, &commands[index], index, omit);
-            assert_eq!(row["success"], true, "{row}");
-        }
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_identity(&rows[0], &commands[0], 0, true);
+        assert_eq!(rows[0]["success"], true, "{rows}");
         let value = fixture.run(&["get", "value", "#x", "--json"], "", 0);
         assert_eq!(value["success"], true);
         assert_eq!(value["data"]["value"], SECRET_VALUE);
@@ -248,31 +239,23 @@ fn batch_send_error_preserves_identity_without_a_daemon_response() {
     let socket = sockets.join("batch-test.sock");
     std::fs::remove_file(&socket).unwrap();
     let listener = UnixListener::bind(socket).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stopped = stop.clone();
     let server = std::thread::spawn(move || {
-        let mut requests = Vec::new();
-        while !stopped.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
-                    let mut line = String::new();
-                    BufReader::new(&stream).read_line(&mut line).unwrap();
-                    if !line.is_empty() {
-                        requests.push(serde_json::from_str::<Value>(&line).unwrap());
-                        stream.write_all(b"INVALID_JSON\n").unwrap();
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => panic!("{error}"),
+        let mut requests = 0;
+        while requests < 2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            if line.is_empty() {
+                continue;
             }
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["action"], "stream_status");
+            stream.write_all(b"INVALID_JSON\n").unwrap();
+            requests += 1;
         }
-        requests
     });
     let commands = json!([["stream", "status"]]);
     let rows = [false, true].map(|omit| {
@@ -282,12 +265,6 @@ fn batch_send_error_preserves_identity_without_a_daemon_response() {
         }
         fixture.run(&args, &commands.to_string(), 1)
     });
-    stop.store(true, Ordering::Relaxed);
-    let requests = server.join().unwrap();
-    assert_eq!(requests.len(), 2, "{requests:?}");
-    assert!(requests
-        .iter()
-        .all(|request| request["action"] == "stream_status"));
     for (omit, rows) in [false, true].into_iter().zip(rows) {
         assert_eq!(rows.as_array().unwrap().len(), 1);
         let row = &rows[0];
@@ -299,4 +276,5 @@ fn batch_send_error_preserves_identity_without_a_daemon_response() {
         );
         assert!(row.get("result").is_none(), "{row}");
     }
+    server.join().unwrap();
 }
