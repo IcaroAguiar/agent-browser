@@ -303,7 +303,7 @@ echo '[
 echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
 ```
 
-With `--json`, `--omit-command` replaces each `command` array with a stable zero-based `index` field on success, failure, or `--bail`; default output is unchanged. Error messages and response data remain unchanged and may contain input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
+With `--json`, `--omit-command` replaces each `command` array with a stable zero-based `index` field on success, failure, or `--bail`; default output is unchanged. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 
 ### Clipboard
 

@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -23,6 +23,11 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str], input: &str, code: i32) -> Value {
+        let output = self.run_raw(args, input, code);
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {output:?}"))
+    }
+
+    fn run_raw(&self, args: &[&str], input: &str, code: i32) -> Output {
         let root = self.0.path();
         let mut child = Command::new(env!("CARGO_BIN_EXE_agent-browser"))
             .env_clear()
@@ -51,7 +56,7 @@ impl Fixture {
             .unwrap();
         let output = child.wait_with_output().unwrap();
         assert_eq!(output.status.code(), Some(code), "{output:?}");
-        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {output:?}"))
+        output
     }
 }
 
@@ -110,11 +115,16 @@ fn batch_preserves_results_and_parse_errors_with_optional_command_omission() {
         let success = fixture.run(&args, r#"[["stream","status"]]"#, 0);
         assert_identity(&success[0], &commands[0], 0, omit);
         assert_eq!(success[0]["success"], true);
-        args.extend([
+        let mut args = vec![
+            "batch",
+            "--json",
             "stream 'status'",
             "'PUBLIC_SENTINEL with spaces'",
             "stream \"status\"",
-        ]);
+        ];
+        if omit {
+            args.push("--omit-command");
+        }
         let rows = fixture.run(&args, "", 1);
         assert_eq!(rows.as_array().unwrap().len(), 3);
         assert_identity(&rows[0], &commands[0], 0, omit);
@@ -127,6 +137,71 @@ fn batch_preserves_results_and_parse_errors_with_optional_command_omission() {
             "Unknown command: PUBLIC_SENTINEL with spaces"
         );
     }
+}
+
+#[test]
+#[ignore = "requires Chrome"]
+fn e2e_batch_omits_fill_secret_from_cli_and_mcp_output() {
+    const SECRET_VALUE: &str = "SECRET_VALUE";
+    let fixture = Fixture::new();
+    let executable = std::env::var("AGENT_BROWSER_EXECUTABLE_PATH").ok();
+    let browser_args = std::env::var("AGENT_BROWSER_ARGS").ok();
+    let mut args = vec![
+        "open",
+        "data:text/html,<input id=x>",
+        "--engine",
+        "chrome",
+        "--json",
+    ];
+    for (flag, value) in [
+        ("--executable-path", executable.as_deref()),
+        ("--args", browser_args.as_deref()),
+    ] {
+        if let Some(value) = value {
+            args.extend([flag, value]);
+        }
+    }
+    assert_eq!(fixture.run(&args, "", 0)["success"], true);
+    let commands = json!([["get", "title"], ["fill", "#x", SECRET_VALUE]]);
+    for (mcp, omit) in [(false, false), (false, true), (true, true)] {
+        assert_eq!(
+            fixture.run(&["fill", "#x", "", "--json"], "", 0)["success"],
+            true
+        );
+        let mut args = vec!["batch", "--json"];
+        if omit {
+            args.push("--omit-command");
+        }
+        let input = if mcp {
+            args = vec!["mcp", "--tools", "all"];
+            let request = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "agent_browser_batch", "arguments": {
+                    "commands": commands, "session": "batch-test", "omitCommand": true}}});
+            format!("{request}\n")
+        } else {
+            commands.to_string()
+        };
+        let output = fixture.run_raw(&args, &input, 0);
+        let raw = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+        assert_eq!(String::from_utf8_lossy(&raw).contains(SECRET_VALUE), !omit);
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let rows = if mcp {
+            assert_eq!(response["result"]["isError"], false, "{response}");
+            assert_eq!(response["result"]["structuredContent"]["exitCode"], 0);
+            &response["result"]["structuredContent"]["response"]
+        } else {
+            &response
+        };
+        assert_eq!(rows.as_array().unwrap().len(), 2);
+        for (index, row) in rows.as_array().unwrap().iter().enumerate() {
+            assert_identity(row, &commands[index], index, omit);
+            assert_eq!(row["success"], true, "{row}");
+        }
+        let value = fixture.run(&["get", "value", "#x", "--json"], "", 0);
+        assert_eq!(value["success"], true);
+        assert_eq!(value["data"]["value"], SECRET_VALUE);
+    }
+    assert_eq!(fixture.run(&["close", "--json"], "", 0)["success"], true);
 }
 
 #[test]

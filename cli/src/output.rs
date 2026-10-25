@@ -3539,7 +3539,7 @@ Examples:
   echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-command
   agent-browser batch --bail < commands.json
 
-With --json --omit-command, each row replaces its command array with a stable zero-based `index` field on success, failure, or --bail. Error messages and response data are unchanged and may contain input values.
+With --json --omit-command, each row replaces its command array with a stable zero-based `index` field on success, failure, or --bail. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: type echoes typed text, and get value/eval may return input values.
 "##
         }
 

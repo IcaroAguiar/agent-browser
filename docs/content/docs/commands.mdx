@@ -686,7 +686,7 @@ echo '[["fill", "#password", "secret"]]' | agent-browser batch --json --omit-com
   </tbody>
 </table>
 
-With `--json --omit-command`, rows use a stable zero-based `index` field on success, failure, or `--bail`; default JSON output keeps the `command` field. Error messages and response data remain unchanged and may contain input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
+With `--json --omit-command`, rows use a stable zero-based `index` field on success, failure, or `--bail`; default JSON output keeps the `command` field. This only removes command arrays and does not make output safe for secrets. Errors and response data are unchanged: `type` echoes typed text, and `get value`/`eval` may return input values. The MCP `agent_browser_batch` tool accepts `omitCommand: true`.
 
 ## MCP server
 
