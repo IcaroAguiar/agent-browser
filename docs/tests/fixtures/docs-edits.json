@@ -16,6 +16,10 @@
       {
         "from": "Each tool also accepts extraArgs for advanced CLI flags and exact CLI parity.",
         "to": "Each tool also accepts extraArgs for per-command options and display or emulation flags such as --engine, but global flags that change network, file, policy, or host access (such as --allowed-domains, --action-policy, --executable-path, --args, and --config) are rejected and must be set in the MCP server's environment or config."
+      },
+      {
+        "from": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional\n--auto-connect",
+        "to": "--cdp <port|url>         # Connect via CDP; root WebSocket query slash is optional\n--cdp-headers <json>     # Headers for --cdp discovery and WebSocket handshake (or AGENT_BROWSER_CDP_HEADERS env)\n--auto-connect"
       }
     ],
     "/configuration": [
