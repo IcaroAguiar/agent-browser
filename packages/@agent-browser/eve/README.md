@@ -43,7 +43,7 @@ export default defineSandbox({
 });
 ```
 
-`@agent-browser/eve/sandbox` also exports `runAgentBrowser` for calling agent-browser from a hand-written eve tool. It derives a short, stable session name from the eve sandbox id; pass `session` when multiple independent browser sessions should share one sandbox.
+`@agent-browser/eve/sandbox` also exports `runAgentBrowser` for calling agent-browser from a hand-written eve tool. It uses one default browser session per sandbox; pass `session` when multiple independent browser sessions should share one sandbox.
 
 ## Configuration
 

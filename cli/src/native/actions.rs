@@ -25,6 +25,7 @@ use super::cdp::types::{
 };
 use super::cookies;
 use super::diff;
+use super::downloads::{DownloadLedger, DownloadState};
 use super::element::RefMap;
 use super::inspect_server::InspectServer;
 use super::interaction;
@@ -353,6 +354,85 @@ fn launch_connection_identity(
     ("local", None)
 }
 
+/// Launch fields that only describe a browser agent-browser starts itself. The CLI never
+/// sends them with an external target, so a launch that inherits one drops them.
+const LOCAL_ONLY_LAUNCH_FIELDS: &[&str] = &[
+    "allowFileAccess",
+    "args",
+    "engine",
+    "executablePath",
+    "extensions",
+    "headless",
+    "hideScrollbars",
+    "noXvfb",
+    "profile",
+    "proxy",
+    "proxyBypass",
+    "storageState",
+    "userAgent",
+    "webgpu",
+];
+
+/// External browser a session attached to. A later launch that names no connection
+/// target resolves to it, so the session stays on that browser until `close`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AttachedTarget {
+    CdpUrl(String),
+    CdpPort(u64),
+    AutoConnect,
+    Provider(String),
+}
+
+impl AttachedTarget {
+    /// Reads the connection target a launch command names, if any.
+    fn named_by(cmd: &Value) -> Option<Self> {
+        if let Some(url) = cmd.get("cdpUrl").and_then(Value::as_str) {
+            return Some(Self::CdpUrl(url.to_string()));
+        }
+        if let Some(port) = cmd.get("cdpPort").and_then(Value::as_u64) {
+            return Some(Self::CdpPort(port));
+        }
+        if cmd.get("autoConnect").and_then(Value::as_bool) == Some(true) {
+            return Some(Self::AutoConnect);
+        }
+        let provider = cmd.get("provider").and_then(Value::as_str)?;
+        (!provider.is_empty()).then(|| Self::Provider(provider.to_ascii_lowercase()))
+    }
+
+    /// The target a successful launch leaves the session attached to. The iOS and
+    /// Safari providers are WebDriver-backed and have no CDP attach to resume.
+    fn from_launch_command(cmd: &Value) -> Option<Self> {
+        Self::named_by(cmd)
+            .filter(|target| !matches!(target, Self::Provider(p) if p == "ios" || p == "safari"))
+    }
+
+    fn insert_into(&self, cmd: &mut serde_json::Map<String, Value>) {
+        let (key, value) = match self {
+            Self::CdpUrl(url) => ("cdpUrl", json!(url)),
+            Self::CdpPort(port) => ("cdpPort", json!(port)),
+            Self::AutoConnect => ("autoConnect", json!(true)),
+            Self::Provider(provider) => ("provider", json!(provider)),
+        };
+        cmd.insert(key.to_string(), value);
+    }
+}
+
+/// Points a launch that names no connection target at the browser the session is
+/// attached to, without the fields only a local launch honors, so it runs exactly
+/// like the original attach. Returns `None` when the launch needs no rewrite.
+fn resolve_launch_target(cmd: &Value, attached: Option<&AttachedTarget>) -> Option<Value> {
+    let attached = attached?;
+    if AttachedTarget::named_by(cmd).is_some() {
+        return None;
+    }
+    let mut resolved = cmd.as_object()?.clone();
+    for field in LOCAL_ONLY_LAUNCH_FIELDS {
+        resolved.remove(*field);
+    }
+    attached.insert_into(&mut resolved);
+    Some(Value::Object(resolved))
+}
+
 fn launch_connection_is_external(
     cdp_url: Option<&str>,
     cdp_port: Option<u64>,
@@ -574,6 +654,8 @@ pub struct DaemonState {
     pub tracing_state: TracingState,
     pub recording_state: RecordingState,
     event_rx: Option<broadcast::Receiver<CdpEvent>>,
+    /// Downloads seen on the attached browser, for `wait --download`.
+    downloads: DownloadLedger,
     pub webmcp: webmcp::RuntimeState,
     /// Whether the active launch opted into Chrome's experimental WebMCP features.
     pub webmcp_enabled: bool,
@@ -638,6 +720,8 @@ pub struct DaemonState {
     pub idle_activity: Arc<IdleActivity>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
+    /// External browser this session attached to; target-less launches resolve to it.
+    attached_target: Option<AttachedTarget>,
     effective_ca_cert: Option<EffectiveCaCert>,
     /// Whether browser-level auto-attach has been enabled for the current
     /// browser so top-level popups pause before their first request.
@@ -728,6 +812,7 @@ impl DaemonState {
             tracing_state: TracingState::new(),
             recording_state: RecordingState::new(),
             event_rx: None,
+            downloads: DownloadLedger::default(),
             webmcp: webmcp::RuntimeState::default(),
             webmcp_enabled: false,
             screencasting: false,
@@ -762,6 +847,7 @@ impl DaemonState {
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
             launch_hash: None,
+            attached_target: None,
             effective_ca_cert: None,
             network_auto_attach_installed: false,
             engine: env::var("AGENT_BROWSER_ENGINE").unwrap_or_else(|_| "chrome".to_string()),
@@ -829,6 +915,7 @@ impl DaemonState {
     }
 
     fn subscribe_to_browser_events(&mut self) {
+        self.downloads.clear();
         if let Some(ref browser) = self.browser {
             self.event_rx = Some(browser.client.subscribe());
         }
@@ -927,6 +1014,11 @@ impl DaemonState {
                         let target_needs_controls = target_info
                             .as_ref()
                             .is_some_and(target_supports_network_controls);
+                        let waiting_for_debugger = event
+                            .params
+                            .get("waitingForDebugger")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
 
                         let df = domain_filter.read().await.clone();
                         let has_proxy_creds = proxy_credentials.read().await.is_some();
@@ -953,6 +1045,7 @@ impl DaemonState {
                                             &sid,
                                             df.as_ref(),
                                             has_proxy_creds,
+                                            waiting_for_debugger,
                                         )
                                         .await
                                     }
@@ -1296,6 +1389,7 @@ impl DaemonState {
                             iframe_sid,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -1331,6 +1425,7 @@ impl DaemonState {
                             page_sid,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -1468,6 +1563,7 @@ impl DaemonState {
                             &attach.session_id,
                             filter.as_ref(),
                             has_proxy_creds,
+                            false,
                         )
                         .await?;
                     }
@@ -1641,7 +1737,6 @@ impl DaemonState {
         let mut changed_targets: Vec<TargetInfoChangedEvent> = Vec::new();
         let mut destroyed_targets: Vec<String> = Vec::new();
         let mut attached_page_sessions: Vec<(TargetInfo, String)> = Vec::new();
-        let mut attached_page_target_ids: HashSet<String> = HashSet::new();
         let mut attached_iframe_sessions: Vec<(String, String)> = Vec::new();
         let mut attached_worker_sessions: Vec<(TargetInfo, String)> = Vec::new();
         let mut attached_other_sessions: Vec<String> = Vec::new();
@@ -1651,6 +1746,9 @@ impl DaemonState {
         loop {
             match rx.try_recv() {
                 Ok(event) => {
+                    if self.downloads.observe(&event.method, &event.params) {
+                        continue;
+                    }
                     // Target events are not session-scoped; handle them first
                     match event.method.as_str() {
                         "Target.targetCreated" => {
@@ -1725,6 +1823,17 @@ impl DaemonState {
                                 }) {
                                     self.webmcp.observations.remove(session);
                                 }
+                                new_targets
+                                    .retain(|entry| entry.target_info.target_id != te.target_id);
+                                new_target_ids.remove(&te.target_id);
+                                attached_page_sessions.retain(|(target_info, _)| {
+                                    target_info.target_id != te.target_id
+                                });
+                                attached_worker_sessions.retain(|(target_info, _)| {
+                                    target_info.target_id != te.target_id
+                                });
+                                attached_iframe_sessions
+                                    .retain(|(target_id, _)| target_id != &te.target_id);
                                 destroyed_targets.push(te.target_id);
                             }
                             continue;
@@ -1753,8 +1862,6 @@ impl DaemonState {
                                             .push((target_info.target_id, sid.to_string()));
                                     }
                                     Ok(target_info) if should_track_target(&target_info) => {
-                                        attached_page_target_ids
-                                            .insert(target_info.target_id.clone());
                                         attached_page_sessions.push((target_info, sid.to_string()));
                                     }
                                     Ok(target_info) if target_is_worker_like(&target_info) => {
@@ -1785,6 +1892,10 @@ impl DaemonState {
                                         }
                                     }
                                 }
+                                attached_page_sessions.retain(|(_, known_sid)| known_sid != sid);
+                                attached_worker_sessions.retain(|(_, known_sid)| known_sid != sid);
+                                attached_iframe_sessions.retain(|(_, known_sid)| known_sid != sid);
+                                attached_other_sessions.retain(|known_sid| known_sid != sid);
                                 detached_iframe_sessions.push(sid.to_string());
                             }
                             continue;
@@ -2190,8 +2301,13 @@ impl DaemonState {
             }
         }
 
+        let attached_page_target_ids: HashSet<&str> = attached_page_sessions
+            .iter()
+            .map(|(t, _)| t.target_id.as_str())
+            .collect();
         if !attached_page_target_ids.is_empty() {
-            new_targets.retain(|te| !attached_page_target_ids.contains(&te.target_info.target_id));
+            new_targets
+                .retain(|te| !attached_page_target_ids.contains(te.target_info.target_id.as_str()));
         }
 
         DrainedEvents {
@@ -2637,6 +2753,7 @@ fn policy_actions_for_command(
     cmd: &Value,
     action: &str,
     needs_implicit_launch: bool,
+    attached: Option<&AttachedTarget>,
 ) -> Vec<String> {
     let mut actions = vec![action.to_string()];
     // `a11y <url>` performs a real browser navigation before the audit. Keep
@@ -2653,22 +2770,14 @@ fn policy_actions_for_command(
     }
     if action == "launch" {
         let plugins = plugins_from_command_or_env(cmd);
-        if let Some(provider) = cmd.get("provider").and_then(|v| v.as_str()) {
-            append_browser_provider_policy_action_for(&mut actions, provider, &plugins);
-        }
-
-        let local_launch = cmd.get("provider").is_none()
-            && cmd.get("cdpUrl").is_none()
-            && cmd.get("cdpPort").is_none()
-            && !cmd
-                .get("autoConnect")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-        if local_launch {
-            append_launch_mutator_policy_actions_for(&mut actions, &plugins);
-        }
+        let resolved = resolve_launch_target(cmd, attached);
+        append_launch_policy_actions(&mut actions, resolved.as_ref().unwrap_or(cmd), &plugins);
     } else if !skip_launch_action(action) && needs_implicit_launch {
         let plugins = plugins_from_command_or_env(cmd);
+        if let Some(launch) = resolve_launch_target(&json!({ "action": "launch" }), attached) {
+            append_launch_policy_actions(&mut actions, &launch, &plugins);
+            return actions;
+        }
         let provider_launch = env::var("AGENT_BROWSER_PROVIDER")
             .ok()
             .map(|provider| provider.to_lowercase())
@@ -2680,6 +2789,27 @@ fn policy_actions_for_command(
         }
     }
     actions
+}
+
+fn append_launch_policy_actions(
+    actions: &mut Vec<String>,
+    launch: &Value,
+    plugins: &[crate::plugins::PluginConfig],
+) {
+    if let Some(provider) = launch.get("provider").and_then(|v| v.as_str()) {
+        append_browser_provider_policy_action_for(actions, provider, plugins);
+    }
+
+    let local_launch = launch.get("provider").is_none()
+        && launch.get("cdpUrl").is_none()
+        && launch.get("cdpPort").is_none()
+        && !launch
+            .get("autoConnect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    if local_launch {
+        append_launch_mutator_policy_actions_for(actions, plugins);
+    }
 }
 
 pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
@@ -2832,11 +2962,12 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     let mut lifecycle_reused = false;
     let mut lifecycle_launched = false;
     let mut lifecycle_relaunched_browser = false;
-    let policy_actions = policy_actions_for_command(cmd, action, needs_launch);
+    let policy_actions =
+        policy_actions_for_command(cmd, action, needs_launch, state.attached_target.as_ref());
 
     // Hot-reload and check action policy
     if let Some(ref mut policy) = state.policy {
-        let _ = policy.reload();
+        policy.reload();
         let mut confirmation_required: Option<String> = None;
         for policy_action in &policy_actions {
             match policy.check(policy_action) {
@@ -3764,6 +3895,7 @@ async fn install_network_controls_for_session(
     session_id: &str,
     filter: Option<&DomainFilter>,
     handle_auth_requests: bool,
+    paused_before_document: bool,
 ) -> Result<(), String> {
     if let Some(filter) = filter {
         network::install_domain_filter(
@@ -3771,6 +3903,7 @@ async fn install_network_controls_for_session(
             session_id,
             &filter.allowed_domains,
             handle_auth_requests,
+            paused_before_document,
         )
         .await?;
     } else if handle_auth_requests {
@@ -3842,6 +3975,7 @@ async fn install_active_network_controls(
             &session_id,
             filter.as_ref(),
             handle_auth_requests,
+            false,
         )
         .await?;
         mgr.resume_if_waiting_pub(&session_id).await?;
@@ -4050,6 +4184,11 @@ async fn auto_launch(
     state: &mut DaemonState,
     plugins: Vec<crate::plugins::PluginConfig>,
 ) -> Result<(), String> {
+    if state.attached_target.is_some() {
+        return handle_launch(&json!({ "action": "launch", "plugins": plugins }), state)
+            .await
+            .map(|_| ());
+    }
     if env::var("AGENT_BROWSER_CDP").is_ok()
         || env::var("AGENT_BROWSER_AUTO_CONNECT").is_ok()
         || !env::var("AGENT_BROWSER_PROVIDER")
@@ -4139,7 +4278,7 @@ async fn auto_launch_inner(
             restore_key: restore_key.as_deref(),
             storage_state,
         })?;
-        let mgr = BrowserManager::connect_cdp(&cdp).await?;
+        let mgr = BrowserManager::connect_cdp_when_listening(&cdp).await?;
         let hash = launch_hash(
             &options,
             &allowed_domains,
@@ -4502,12 +4641,7 @@ fn launch_options_from_env() -> LaunchOptions {
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false),
         args: env::var("AGENT_BROWSER_ARGS")
-            .map(|v| {
-                v.split([',', '\n'])
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(|v| crate::flags::split_launch_args(&v))
             .unwrap_or_default(),
         extensions,
         storage_state: env::var("AGENT_BROWSER_STATE").ok(),
@@ -4869,6 +5003,20 @@ async fn handle_launch_with_deadline(
     state: &mut DaemonState,
     deadline: std::time::Duration,
 ) -> Result<Value, String> {
+    let resolved = resolve_launch_target(cmd, state.attached_target.as_ref());
+    let cmd = resolved.as_ref().unwrap_or(cmd);
+    let result = handle_launch_for_target(cmd, state, deadline).await;
+    if result.is_ok() {
+        state.attached_target = AttachedTarget::from_launch_command(cmd);
+    }
+    result
+}
+
+async fn handle_launch_for_target(
+    cmd: &Value,
+    state: &mut DaemonState,
+    deadline: std::time::Duration,
+) -> Result<Value, String> {
     if cmd.get("cdpUrl").and_then(Value::as_str).is_some()
         || cmd.get("cdpPort").and_then(Value::as_u64).is_some()
         || cmd.get("autoConnect").and_then(Value::as_bool) == Some(true)
@@ -5160,7 +5308,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     if let Some(url) = cdp_url {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(url).await?);
+        state.browser = Some(BrowserManager::connect_cdp_when_listening(url).await?);
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -5177,7 +5325,7 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     if let Some(port) = cdp_port {
         state.reset_input_state();
-        state.browser = Some(BrowserManager::connect_cdp(&port.to_string()).await?);
+        state.browser = Some(BrowserManager::connect_cdp_when_listening(&port.to_string()).await?);
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -5724,6 +5872,7 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
     let save_result = auto_save_restore_state(state).await;
     close_all_browser_backends(state).await?;
+    state.attached_target = None;
 
     // Stop background Fetch handler
     if let Some(task) = state.fetch_handler_task.take() {
@@ -6325,6 +6474,7 @@ async fn handle_click(cmd: &Value, state: &mut DaemonState) -> Result<Value, Str
             &state.ref_map,
             selector,
             &state.iframe_sessions,
+            true,
         )
         .await?;
         let offset = super::element::session_viewport_offset(
@@ -7802,7 +7952,31 @@ async fn handle_set_media(cmd: &Value, state: &mut DaemonState) -> Result<Value,
     Ok(json!({ "set": true }))
 }
 
+/// Chrome may still be flushing a download to disk after signalling
+/// completion; wait briefly for the file to appear.
+async fn wait_for_downloaded_file(path: &std::path::Path) -> bool {
+    for _ in 0..10 {
+        if path.exists() {
+            return true;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    path.exists()
+}
+
 async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let result = download_to_path(cmd, state).await;
+    // `download` points the browser at the destination's directory; restore the
+    // configured one so later downloads land where `wait --download` expects.
+    if let Some(mgr) = state.browser.as_ref() {
+        if !mgr.is_cdp_connection() {
+            mgr.enable_download_events().await;
+        }
+    }
+    result
+}
+
+async fn download_to_path(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let selector = cmd
         .get("selector")
         .and_then(|v| v.as_str())
@@ -7923,19 +8097,15 @@ async fn handle_download(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
+    if let Some(ref guid) = downloaded_guid {
+        state.downloads.mark_claimed(guid);
+    }
+
     // With "allowAndName" behavior, Chrome saves the file using the GUID as filename.
     // Rename it to the user-requested filename.
     if let Some(guid) = downloaded_guid {
         let guid_path = download_dir.join(&guid);
-        // Chrome may still be flushing the file to disk after signalling
-        // completion; wait briefly for it to appear.
-        for _ in 0..10 {
-            if guid_path.exists() {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-        if guid_path.exists() {
+        if wait_for_downloaded_file(&guid_path).await {
             std::fs::rename(&guid_path, &dest)
                 .map_err(|e| format!("Failed to rename downloaded file: {}", e))?;
         } else {
@@ -10839,6 +11009,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.ref_map,
         source,
         &state.iframe_sessions,
+        false,
     )
     .await?;
     let (tx, ty, target_session_id) = super::element::resolve_element_center(
@@ -10847,6 +11018,7 @@ async fn handle_drag(cmd: &Value, state: &mut DaemonState) -> Result<Value, Stri
         &state.ref_map,
         target,
         &state.iframe_sessions,
+        false,
     )
     .await?;
 
@@ -11089,43 +11261,112 @@ async fn handle_responsebody(cmd: &Value, state: &DaemonState) -> Result<Value, 
     }
 }
 
-async fn handle_waitfordownload(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
-    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
-    let session_id = mgr.active_session_id()?.to_string();
+async fn handle_waitfordownload(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let timeout_ms = state.timeout_ms(cmd);
+    let mut rx = state
+        .browser
+        .as_ref()
+        .ok_or("Browser not launched")?
+        .client
+        .subscribe();
+    // Events that arrived after the per-command drain, such as during the
+    // liveness check, are not delivered to the new receiver. Drain them into
+    // the ledger now so a download that already finished is claimed (#561).
+    state.drain_cdp_events_background().await?;
 
-    let mut rx = mgr.client.subscribe();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
-
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return Err("Timeout waiting for download".to_string());
+    let record = loop {
+        if let Some(record) = state.downloads.claim_finished() {
+            break record;
         }
-
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, rx.recv()).await {
             Ok(Ok(event)) => {
-                // Browser-domain events may arrive without a sessionId;
-                // Page-domain events are matched by session.
-                let is_page_session = event.session_id.as_deref() == Some(&session_id);
-                let is_progress = event.method == "Browser.downloadProgress"
-                    || (event.method == "Page.downloadProgress" && is_page_session);
-
-                if is_progress
-                    && event.params.get("state").and_then(|v| v.as_str()) == Some("completed")
-                {
-                    let path = cmd
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("download");
-                    return Ok(json!({ "path": path }));
-                }
+                state.downloads.observe(&event.method, &event.params);
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
             Ok(Err(_)) => return Err("Event stream closed".to_string()),
             Err(_) => return Err("Timeout waiting for download".to_string()),
         }
+    };
+
+    if record.state == DownloadState::Canceled {
+        return Err("Download was canceled".to_string());
     }
+    let path_arg = cmd.get("path").and_then(|v| v.as_str());
+    let Some(saved) = record.file_path else {
+        if path_arg.is_none() {
+            return Ok(json!({ "completed": true }));
+        }
+        return Err(
+            "Download completed but the browser did not report where it saved the file".to_string(),
+        );
+    };
+    let saved = PathBuf::from(saved);
+    let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    let launched_locally = !mgr.is_cdp_connection();
+    let download_dir = mgr.download_path.clone();
+    // A CDP endpoint reports a path on its own filesystem, which may not be
+    // this machine's.
+    if launched_locally && !wait_for_downloaded_file(&saved).await {
+        return Err(format!(
+            "Download completed but no file is at {}",
+            saved.display()
+        ));
+    }
+
+    let Some(path_str) = path_arg else {
+        return Ok(json!({ "path": saved.to_string_lossy() }));
+    };
+    if !may_move_download(&saved, launched_locally, download_dir.as_deref()) {
+        state.downloads.release(&record.guid);
+        return Err(format!(
+            "Refusing to move {}: only downloads from a browser agent-browser launched, inside its download directory, can be moved",
+            saved.display()
+        ));
+    }
+    // A bad destination must not consume the download, so a retry can claim it.
+    move_download(&saved, path_str).inspect_err(|_| state.downloads.release(&record.guid))
+}
+
+/// The saved path comes from a CDP event, so only a browser this daemon
+/// launched is trusted to name a local file. A remote endpoint could otherwise
+/// point the move at any file the daemon can read.
+fn may_move_download(
+    saved: &std::path::Path,
+    launched_locally: bool,
+    download_dir: Option<&str>,
+) -> bool {
+    if !launched_locally {
+        return false;
+    }
+    let Some(dir) = download_dir else {
+        return true;
+    };
+    match (fs::canonicalize(saved), fs::canonicalize(dir)) {
+        (Ok(saved), Ok(dir)) => saved.starts_with(dir),
+        _ => false,
+    }
+}
+
+fn move_download(saved: &std::path::Path, path_str: &str) -> Result<Value, String> {
+    let dest = if std::path::Path::new(path_str).is_absolute() {
+        PathBuf::from(path_str)
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {}", e))?
+            .join(path_str)
+    };
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create download directory: {}", e))?;
+    }
+    if fs::rename(saved, &dest).is_err() {
+        // rename fails across filesystems; copy, then remove the original.
+        fs::copy(saved, &dest).map_err(|e| format!("Failed to move downloaded file: {}", e))?;
+        let _ = fs::remove_file(saved);
+    }
+    Ok(json!({ "path": dest.to_string_lossy() }))
 }
 
 async fn handle_window_new(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
@@ -13770,6 +14011,217 @@ fn attach_tab_gone_data(resp: &mut Value, state: &DaemonState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_launched_browser_may_name_the_file_to_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let downloads = dir.path().join("downloads");
+        std::fs::create_dir(&downloads).unwrap();
+        let inside = downloads.join("report.bin");
+        let outside = dir.path().join("secret");
+        std::fs::write(&inside, "").unwrap();
+        std::fs::write(&outside, "").unwrap();
+        let downloads = downloads.to_str();
+
+        assert!(!super::may_move_download(&inside, false, None));
+        assert!(!super::may_move_download(&inside, false, downloads));
+        assert!(super::may_move_download(&outside, true, None));
+        assert!(super::may_move_download(&inside, true, downloads));
+        assert!(!super::may_move_download(&outside, true, downloads));
+        let escape = dir.path().join("downloads").join("..").join("secret");
+        assert!(!super::may_move_download(&escape, true, downloads));
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("downloads").join("link");
+            std::os::unix::fs::symlink(&outside, &link).unwrap();
+            assert!(!super::may_move_download(&link, true, downloads));
+        }
+    }
+
+    async fn start_finished_download(
+        state: &mut super::DaemonState,
+        download_dir: &std::path::Path,
+    ) -> std::path::PathBuf {
+        for cmd in [
+            serde_json::json!({ "id": "1", "action": "launch", "headless": true,
+                "downloadPath": download_dir.to_string_lossy() }),
+            serde_json::json!({ "id": "2", "action": "navigate", "url":
+                "data:text/html,<a id=dl download=report.bin href='data:application/octet-stream,report'>dl</a>" }),
+            serde_json::json!({ "id": "3", "action": "evaluate",
+                "script": "document.getElementById('dl').click()" }),
+        ] {
+            let resp = super::execute_command(&cmd, state).await;
+            assert_eq!(resp["success"], true, "{resp}");
+        }
+        let saved = download_dir.join("report.bin");
+        for _ in 0..50 {
+            if saved.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            saved.exists(),
+            "download should land in the configured directory"
+        );
+        saved
+    }
+
+    /// Events that arrive after the per-command drain, for example during the
+    /// liveness check, are still in the daemon's receiver when the wait starts.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_claims_a_completion_left_in_the_daemon_receiver() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        start_finished_download(&mut state, &dir.path().join("downloads")).await;
+
+        let result = super::handle_waitfordownload(
+            &serde_json::json!({ "action": "waitfordownload", "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_failed_move_leaves_the_download_claimable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        let saved = start_finished_download(&mut state, &dir.path().join("downloads")).await;
+
+        // A regular file as the parent directory makes the destination invalid.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "4", "action": "waitfordownload",
+                "path": blocker.join("report.bin").to_string_lossy(), "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{resp}");
+        assert!(saved.exists(), "a failed move keeps the source file");
+
+        let dest = dir.path().join("out").join("report.bin");
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "waitfordownload",
+                "path": dest.to_string_lossy(), "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "report");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    /// `download` points the browser at another directory; later downloads must
+    /// go back to the configured one so `wait --download` can still move them.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_wait_download_after_download_command_uses_configured_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = super::DaemonState::new();
+        start_finished_download(&mut state, &dir.path().join("downloads")).await;
+        let claimed = super::execute_command(
+            &serde_json::json!({ "id": "4", "action": "waitfordownload", "timeout": 2000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(claimed["success"], true, "{claimed}");
+
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "download", "selector": "#dl",
+                "path": dir.path().join("other").join("first.bin").to_string_lossy() }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "6", "action": "evaluate",
+                "script": "document.getElementById('dl').click()" }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+
+        let dest = dir.path().join("out").join("second.bin");
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "7", "action": "waitfordownload",
+                "path": dest.to_string_lossy(), "timeout": 5000 }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "report");
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut state,
+        )
+        .await;
+    }
+
+    /// Connecting over CDP must not reset the attached browser's download
+    /// directory, and the wait must not require the file on the local disk.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_cdp_connect_keeps_the_browser_download_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let download_dir = dir.path().join("downloads");
+        std::fs::create_dir_all(&download_dir).unwrap();
+        let mut owner = super::DaemonState::new();
+        for cmd in [
+            serde_json::json!({ "id": "1", "action": "launch", "headless": true,
+                "downloadPath": download_dir.to_string_lossy() }),
+            serde_json::json!({ "id": "2", "action": "navigate", "url":
+                "data:text/html,<a id=dl download=report.bin href='data:application/octet-stream,report'>dl</a>" }),
+        ] {
+            let resp = super::execute_command(&cmd, &mut owner).await;
+            assert_eq!(resp["success"], true, "{resp}");
+        }
+        let cdp_url = owner.browser.as_ref().unwrap().get_cdp_url().to_string();
+
+        let mut attached = super::DaemonState::new();
+        for cmd in [
+            serde_json::json!({ "id": "3", "action": "launch", "cdpUrl": cdp_url }),
+            serde_json::json!({ "id": "4", "action": "evaluate",
+                "script": "document.getElementById('dl').click()" }),
+        ] {
+            let resp = super::execute_command(&cmd, &mut attached).await;
+            assert_eq!(resp["success"], true, "{resp}");
+        }
+        let resp = super::execute_command(
+            &serde_json::json!({ "id": "5", "action": "waitfordownload", "timeout": 5000 }),
+            &mut attached,
+        )
+        .await;
+        assert_eq!(resp["success"], true, "{resp}");
+        let saved = download_dir.join("report.bin");
+        for _ in 0..50 {
+            if saved.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            saved.exists(),
+            "download should stay in the configured directory"
+        );
+        super::execute_command(
+            &serde_json::json!({ "id": "9", "action": "close" }),
+            &mut owner,
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn test_auth_login_releases_remote_objects_after_failures() {
         use futures_util::{SinkExt, StreamExt};
@@ -14500,6 +14952,99 @@ mod tests {
     }
 
     #[test]
+    fn drain_drops_targets_destroyed_in_the_same_batch() {
+        let mut state = DaemonState::new();
+        let (events, receiver) = broadcast::channel(16);
+        state.event_rx = Some(receiver);
+
+        events
+            .send(CdpEvent {
+                method: "Target.targetInfoChanged".to_string(),
+                params: json!({"targetInfo":{"targetId":"closed","type":"page","title":"","url":"https://example.com/","attached":false}}),
+                session_id: None,
+            })
+            .unwrap();
+        events
+            .send(CdpEvent {
+                method: "Target.targetDestroyed".to_string(),
+                params: json!({"targetId":"closed"}),
+                session_id: None,
+            })
+            .unwrap();
+
+        let drained = state.drain_cdp_events();
+        assert!(drained.new_targets.is_empty());
+        assert_eq!(drained.destroyed_targets, vec!["closed".to_string()]);
+    }
+
+    #[test]
+    fn drain_drops_sessions_detached_in_the_same_batch() {
+        let mut state = DaemonState::new();
+        let (events, receiver) = broadcast::channel(16);
+        state.event_rx = Some(receiver);
+
+        events
+            .send(CdpEvent {
+                method: "Target.attachedToTarget".to_string(),
+                params: json!({"sessionId":"old","targetInfo":{"targetId":"w","type":"service_worker","title":"","url":"https://example.com/sw.js","attached":true},"waitingForDebugger":true}),
+                session_id: None,
+            })
+            .unwrap();
+        events
+            .send(CdpEvent {
+                method: "Target.detachedFromTarget".to_string(),
+                params: json!({"sessionId":"old","targetId":"w"}),
+                session_id: None,
+            })
+            .unwrap();
+        events
+            .send(CdpEvent {
+                method: "Target.attachedToTarget".to_string(),
+                params: json!({"sessionId":"new","targetInfo":{"targetId":"w","type":"service_worker","title":"","url":"https://example.com/sw.js","attached":true},"waitingForDebugger":true}),
+                session_id: None,
+            })
+            .unwrap();
+
+        let drained = state.drain_cdp_events();
+        assert_eq!(drained.attached_worker_sessions.len(), 1);
+        assert_eq!(drained.attached_worker_sessions[0].1, "new");
+    }
+
+    #[test]
+    fn drain_keeps_discovered_page_when_its_session_detaches() {
+        let mut state = DaemonState::new();
+        let (events, receiver) = broadcast::channel(16);
+        state.event_rx = Some(receiver);
+
+        events
+            .send(CdpEvent {
+                method: "Target.targetInfoChanged".to_string(),
+                params: json!({"targetInfo":{"targetId":"p","type":"page","title":"","url":"https://example.com/","attached":false}}),
+                session_id: None,
+            })
+            .unwrap();
+        events
+            .send(CdpEvent {
+                method: "Target.attachedToTarget".to_string(),
+                params: json!({"sessionId":"old","targetInfo":{"targetId":"p","type":"page","title":"","url":"https://example.com/","attached":true},"waitingForDebugger":true}),
+                session_id: None,
+            })
+            .unwrap();
+        events
+            .send(CdpEvent {
+                method: "Target.detachedFromTarget".to_string(),
+                params: json!({"sessionId":"old","targetId":"p"}),
+                session_id: None,
+            })
+            .unwrap();
+
+        let drained = state.drain_cdp_events();
+        assert!(drained.attached_page_sessions.is_empty());
+        assert_eq!(drained.new_targets.len(), 1);
+        assert_eq!(drained.new_targets[0].target_info.target_id, "p");
+    }
+
+    #[test]
     fn test_restore_validation_is_deferred_after_launch() {
         assert!(!should_validate_restore_after_action("launch"));
         assert!(should_validate_restore_after_action("navigate"));
@@ -14765,7 +15310,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true);
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
 
         assert_eq!(actions[0], "navigate");
         assert!(actions.contains(&"plugin:stealth:launch.mutate".to_string()));
@@ -14788,7 +15333,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", false);
+        let actions = policy_actions_for_command(&cmd, "navigate", false, None);
 
         assert_eq!(actions, vec!["navigate".to_string()]);
     }
@@ -14806,11 +15351,11 @@ mod tests {
         });
 
         assert_eq!(
-            policy_actions_for_command(&with_url, "a11y", false),
+            policy_actions_for_command(&with_url, "a11y", false, None),
             vec!["a11y".to_string(), "navigate".to_string()]
         );
         assert_eq!(
-            policy_actions_for_command(&current_page, "a11y", false),
+            policy_actions_for_command(&current_page, "a11y", false, None),
             vec!["a11y".to_string()]
         );
     }
@@ -14837,10 +15382,40 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true);
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
 
         assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
         assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
+    }
+
+    #[test]
+    fn test_policy_actions_follow_inherited_provider_attach() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_PROVIDER"]);
+        guard.remove("AGENT_BROWSER_PROVIDER");
+        let plugins = json!([
+            {
+                "name": "browserbox",
+                "command": "agent-browser-plugin-browserbox",
+                "capabilities": ["browser.provider"]
+            },
+            {
+                "name": "stealth",
+                "command": "agent-browser-plugin-stealth",
+                "capabilities": ["launch.mutate"]
+            }
+        ]);
+        let attached = AttachedTarget::Provider("browserbox".to_string());
+        let launch = json!({ "action": "launch", "headless": false, "plugins": plugins });
+        let navigate =
+            json!({ "action": "navigate", "url": "https://example.com", "plugins": plugins });
+
+        for actions in [
+            policy_actions_for_command(&launch, "launch", false, Some(&attached)),
+            policy_actions_for_command(&navigate, "navigate", true, Some(&attached)),
+        ] {
+            assert!(actions.contains(&"plugin:browserbox:browser.provider".to_string()));
+            assert!(!actions.contains(&"plugin:stealth:launch.mutate".to_string()));
+        }
     }
 
     #[test]
@@ -14865,7 +15440,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "navigate", true);
+        let actions = policy_actions_for_command(&cmd, "navigate", true, None);
 
         assert_eq!(actions, vec!["navigate".to_string()]);
     }
@@ -14891,7 +15466,7 @@ mod tests {
             ]
         });
 
-        let actions = policy_actions_for_command(&cmd, "auth_login", false);
+        let actions = policy_actions_for_command(&cmd, "auth_login", false, None);
 
         assert_eq!(actions, vec!["auth_login".to_string()]);
     }
@@ -16536,6 +17111,24 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
     }
 
     #[test]
+    fn test_launch_options_from_env_args_keep_commas_inside_values() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ARGS"]);
+        guard.set(
+            "AGENT_BROWSER_ARGS",
+            "--disable-features=HttpsUpgrades,Translate,--no-first-run\n--window-size=1280,720",
+        );
+        let opts = launch_options_from_env();
+        assert_eq!(
+            opts.args,
+            vec![
+                "--disable-features=HttpsUpgrades,Translate",
+                "--no-first-run",
+                "--window-size=1280,720",
+            ]
+        );
+    }
+
+    #[test]
     fn test_launch_options_from_env_hide_scrollbars_false() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_HIDE_SCROLLBARS"]);
         guard.set("AGENT_BROWSER_HIDE_SCROLLBARS", "false");
@@ -16958,6 +17551,53 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
                 "rejected external launch should not commit allowedDomains"
             );
         }
+    }
+
+    #[test]
+    fn test_resolve_launch_target_inherits_attach_and_strips_local_fields() {
+        let attached = AttachedTarget::CdpPort(9222);
+        let own_target = json!({ "action": "launch", "cdpPort": 9333 });
+        assert_eq!(resolve_launch_target(&own_target, Some(&attached)), None);
+
+        let cmd = json!({
+            "action": "launch",
+            "executablePath": "/usr/bin/chromium",
+            "args": ["--no-sandbox"],
+            "headless": false,
+            "allowedDomains": ["example.com"]
+        });
+        assert_eq!(resolve_launch_target(&cmd, None), None);
+        assert_eq!(
+            resolve_launch_target(&cmd, Some(&attached)),
+            Some(json!({ "action": "launch", "cdpPort": 9222, "allowedDomains": ["example.com"] }))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inherited_cdp_attach_refuses_allowed_domains() {
+        let guard = EnvGuard::new(&["AGENT_BROWSER_ALLOWED_DOMAINS"]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        let mut state = DaemonState::new();
+        state.attached_target = Some(AttachedTarget::CdpPort(9222));
+
+        let error = handle_launch(
+            &json!({ "action": "launch", "allowedDomains": ["example.com"] }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("not supported with --cdp"), "got: {}", error);
+        assert!(state.domain_filter.read().await.is_none());
+        assert_eq!(state.attached_target, Some(AttachedTarget::CdpPort(9222)));
+    }
+
+    #[tokio::test]
+    async fn test_close_clears_attached_target() {
+        let mut state = DaemonState::new();
+        state.attached_target = Some(AttachedTarget::CdpPort(9222));
+        handle_close(&mut state).await.unwrap();
+        assert_eq!(state.attached_target, None);
     }
 
     #[tokio::test]
