@@ -17,7 +17,9 @@ use std::os::unix::net::UnixStream;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 pub(crate) const INTERNAL_DAEMON_SHUTDOWN_ACTION: &str = "__agent_browser_internal_shutdown";
 
@@ -196,13 +198,16 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
     #[cfg(windows)]
     unsafe {
+        // An exited process can still be opened while any handle to it is
+        // open, so check that it has not exited.
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle != 0 {
-            CloseHandle(handle);
-            true
-        } else {
-            false
+        if handle == 0 {
+            return false;
         }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok && code == windows_sys::Win32::Foundation::STILL_ACTIVE as u32
     }
 }
 
