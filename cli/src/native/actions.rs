@@ -728,6 +728,9 @@ pub struct DaemonState {
     pub idle_activity: Arc<IdleActivity>,
     /// Hash of launch options used for the current browser, for relaunch detection.
     launch_hash: Option<u64>,
+    /// CDP endpoint and headers from the last explicit CDP launch, reused when
+    /// the daemon reconnects to that same endpoint on its own.
+    cdp_headers: Option<(String, Vec<(String, String)>)>,
     /// External browser this session attached to; target-less launches resolve to it.
     attached_target: Option<AttachedTarget>,
     effective_ca_cert: Option<EffectiveCaCert>,
@@ -869,6 +872,7 @@ impl DaemonState {
             stream_server: None,
             idle_activity: Arc::new(IdleActivity::new()),
             launch_hash: None,
+            cdp_headers: None,
             attached_target: None,
             effective_ca_cert: None,
             network_auto_attach_installed: false,
@@ -4412,7 +4416,8 @@ async fn auto_launch_inner(
             restore_key: restore_key.as_deref(),
             storage_state,
         })?;
-        let mgr = BrowserManager::connect_cdp_when_listening(&cdp, None).await?;
+        let headers = cdp_headers_for(state, &cdp).or_else(cdp_headers_from_env);
+        let mgr = BrowserManager::connect_cdp_when_listening(&cdp, headers).await?;
         let hash = launch_hash(
             &options,
             &allowed_domains,
@@ -5131,6 +5136,38 @@ async fn try_load_storage_state(state: &mut DaemonState, path: &Option<String>) 
 // ---------------------------------------------------------------------------
 
 /// Optional WebSocket connect headers for generic CDP URLs (`cdpUrl` / `--cdp`).
+/// Headers from the last explicit CDP launch, when it named this endpoint.
+fn cdp_headers_for(state: &DaemonState, endpoint: &str) -> Option<Vec<(String, String)>> {
+    state
+        .cdp_headers
+        .as_ref()
+        .filter(|(saved, _)| saved == endpoint)
+        .map(|(_, headers)| headers.clone())
+}
+
+/// Headers the CLI passed to the daemon with `AGENT_BROWSER_CDP`.
+fn cdp_headers_from_env() -> Option<Vec<(String, String)>> {
+    let raw = env::var("AGENT_BROWSER_CDP_HEADERS").ok()?;
+    let headers: Value = serde_json::from_str(&raw).ok()?;
+    cdp_headers_from_command(&json!({ "cdpHeaders": headers }))
+}
+
+/// A relaunch rewritten to the attached CDP target keeps that target's headers.
+fn attach_saved_cdp_headers(launch: &mut Value, state: &DaemonState) {
+    let endpoint = match (launch.get("cdpUrl"), launch.get("cdpPort")) {
+        (Some(Value::String(url)), _) => url.clone(),
+        (_, Some(port)) => port.to_string(),
+        _ => return,
+    };
+    if let Some(headers) = cdp_headers_for(state, &endpoint) {
+        let map: serde_json::Map<String, Value> = headers
+            .into_iter()
+            .map(|(name, value)| (name, Value::String(value)))
+            .collect();
+        launch["cdpHeaders"] = Value::Object(map);
+    }
+}
+
 /// Distinct from page/origin `--headers` (Fetch interception).
 fn cdp_headers_from_command(cmd: &Value) -> Option<Vec<(String, String)>> {
     let map = cmd.get("cdpHeaders")?.as_object()?;
@@ -5169,7 +5206,10 @@ async fn handle_launch_with_deadline(
     state: &mut DaemonState,
     deadline: std::time::Duration,
 ) -> Result<Value, String> {
-    let resolved = resolve_launch_target(cmd, state.attached_target.as_ref());
+    let mut resolved = resolve_launch_target(cmd, state.attached_target.as_ref());
+    if let Some(launch) = resolved.as_mut() {
+        attach_saved_cdp_headers(launch, state);
+    }
     let cmd = resolved.as_ref().unwrap_or(cmd);
     let result = handle_launch_for_target(cmd, state, deadline).await;
     if result.is_ok() {
@@ -5475,9 +5515,10 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     if let Some(url) = cdp_url {
         state.reset_input_state();
-        state.browser = Some(
-            BrowserManager::connect_cdp_when_listening(url, cdp_headers_from_command(cmd)).await?,
-        );
+        let headers = cdp_headers_from_command(cmd);
+        state.browser =
+            Some(BrowserManager::connect_cdp_when_listening(url, headers.clone()).await?);
+        state.cdp_headers = headers.map(|headers| (url.to_string(), headers));
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -5494,13 +5535,11 @@ async fn handle_launch_inner(cmd: &Value, state: &mut DaemonState) -> Result<Val
 
     if let Some(port) = cdp_port {
         state.reset_input_state();
+        let headers = cdp_headers_from_command(cmd);
         state.browser = Some(
-            BrowserManager::connect_cdp_when_listening(
-                &port.to_string(),
-                cdp_headers_from_command(cmd),
-            )
-            .await?,
+            BrowserManager::connect_cdp_when_listening(&port.to_string(), headers.clone()).await?,
         );
+        state.cdp_headers = headers.map(|headers| (port.to_string(), headers));
         state.launch_hash = Some(new_hash);
         state.subscribe_to_browser_events();
         state.start_fetch_handler();
@@ -17509,6 +17548,23 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"data":{}}'
             hash_for(json!({ "cdpHeaders": { "Authorization": "Bearer a" } }))
         );
         assert_ne!(a, hash_for(json!({})));
+    }
+
+    #[test]
+    fn test_relaunch_keeps_cdp_headers_only_for_their_endpoint() {
+        let mut state = DaemonState::new();
+        state.cdp_headers = Some((
+            "wss://example.com/cdp".to_string(),
+            vec![("Authorization".to_string(), "Bearer a".to_string())],
+        ));
+
+        let mut same = json!({ "action": "launch", "cdpUrl": "wss://example.com/cdp" });
+        attach_saved_cdp_headers(&mut same, &state);
+        assert_eq!(same["cdpHeaders"]["Authorization"], "Bearer a");
+
+        let mut other = json!({ "action": "launch", "cdpUrl": "wss://other.example/cdp" });
+        attach_saved_cdp_headers(&mut other, &state);
+        assert!(other.get("cdpHeaders").is_none());
     }
 
     #[test]
