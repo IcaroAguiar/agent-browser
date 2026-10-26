@@ -479,18 +479,19 @@ pub async fn save_auto_state(
     write_state_to(ff, &path).await
 }
 
-/// Run in a BiDi sandbox so page scripts never see the payload; the origin is checked in the same call so a redirect cannot race it.
+/// Run in a BiDi sandbox so page scripts never see the payload. The origin is checked in the same call so a redirect cannot race it, and the call returns false when the page landed elsewhere.
 const RESTORE_STORAGE_JS: &str = r#"(expectedOrigin, payload) => {
     if (location.origin !== expectedOrigin) {
-        throw new Error('landed on ' + location.origin + ' instead of ' + expectedOrigin);
+        return false;
     }
     const p = JSON.parse(payload);
     for (const e of p.localStorage) localStorage.setItem(e.name, e.value);
     for (const e of p.sessionStorage) sessionStorage.setItem(e.name, e.value);
+    return true;
 }"#;
 
 /// Loads the cookies and origin storage in a `state.rs` JSON file, dropping fields BiDi
-/// does not support, like Chrome's `handle_state_load`.
+/// does not support, like Chrome's `handle_state_load`. Origins that redirect elsewhere are skipped and returned.
 pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<String>, String> {
     let json_str = read_state_json(path)?;
     let state: StorageState =
@@ -506,6 +507,7 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
     }
 
     let context = ff.context.clone();
+    let mut skipped = Vec::new();
     for origin in &state.origins {
         if origin.local_storage.is_empty() && origin.session_storage.is_empty() {
             continue;
@@ -520,7 +522,8 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
         ff.refs.clear();
 
         let payload = serde_json::to_string(origin).map_err(|e| e.to_string())?;
-        ff.bidi
+        let restored = ff
+            .bidi
             .call_function_in_sandbox(
                 &context,
                 "agent-browser",
@@ -529,9 +532,12 @@ pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<
             )
             .await
             .map_err(|e| format!("Failed to restore storage for {}: {e}", origin.origin))?;
+        if restored != json!(true) {
+            skipped.push(origin.origin.clone());
+        }
     }
 
-    Ok(Vec::new())
+    Ok(skipped)
 }
 
 /// Loads a `state.rs` JSON file, dropping Chrome-only cookie fields, like Chrome's

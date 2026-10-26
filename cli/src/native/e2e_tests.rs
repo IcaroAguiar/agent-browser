@@ -14940,3 +14940,84 @@ async fn e2e_firefox_cookie_default_path() {
     );
     firefox_close(&mut state).await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_firefox_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
+    required_firefox_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = firefox_test_environment(tmp.path());
+    let (other_origin, other_server) =
+        start_raw_http_server(html_response("<title>other</title>")).await;
+    let (redirect_origin, redirect_server) = start_raw_http_server(format!(
+        "HTTP/1.1 302 Found\r\nLocation: {}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        other_origin
+    ))
+    .await;
+    let (hook_origin, hook_server) = start_raw_http_server(html_response(
+        "<script>
+            window.__captured = [];
+            const parse = JSON.parse;
+            JSON.parse = function (...args) { window.__captured.push(args); return parse.apply(this, args); };
+            const setItem = Storage.prototype.setItem;
+            Storage.prototype.setItem = function (...args) { window.__captured.push(args); return setItem.apply(this, args); };
+        </script>",
+    ))
+    .await;
+
+    let state_path = tmp.path().join("state.json");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec(&json!({
+            "cookies": [],
+            "origins": [
+                {
+                    "origin": redirect_origin,
+                    "localStorage": [{ "name": "redirect-token", "value": "redirect-secret" }],
+                    "sessionStorage": [{ "name": "redirect-session", "value": "redirect-secret" }]
+                },
+                {
+                    "origin": hook_origin,
+                    "localStorage": [{ "name": "hook-token", "value": "hook-secret" }],
+                    "sessionStorage": [{ "name": "hook-session", "value": "hook-secret" }]
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut state = DaemonState::new();
+    launch_firefox(&mut state, json!({})).await;
+    let load = firefox_command(
+        &mut state,
+        json!({ "id": "load", "action": "state_load", "path": state_path }),
+    )
+    .await;
+    assert_success(&load);
+    assert_eq!(get_data(&load)["skippedOrigins"], json!([redirect_origin]));
+
+    assert_eq!(
+        firefox_eval(&mut state, "window.__captured.length").await,
+        json!(0)
+    );
+    assert_eq!(
+        firefox_eval(
+            &mut state,
+            "[localStorage.getItem('hook-token'), sessionStorage.getItem('hook-session')]"
+        )
+        .await,
+        json!(["hook-secret", "hook-secret"])
+    );
+
+    firefox_open(&mut state, &format!("{}/", other_origin)).await;
+    assert_eq!(
+        firefox_eval(&mut state, "localStorage.length + sessionStorage.length").await,
+        json!(0)
+    );
+
+    firefox_close(&mut state).await;
+    other_server.abort();
+    redirect_server.abort();
+    hook_server.abort();
+}
