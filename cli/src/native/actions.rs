@@ -3192,7 +3192,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     let mut result = match action {
-        _ if firefox_routed => firefox::actions::execute(action, cmd, state).await,
+        _ if firefox_routed => Box::pin(firefox::actions::execute(action, cmd, state)).await,
         "launch" => {
             let webmcp_enabled = cmd
                 .get("webmcp")
