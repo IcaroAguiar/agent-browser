@@ -1,8 +1,29 @@
 # agent-browser
 
-## 0.39.3
+## 0.39.4
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- Fixed **`wait --download`** timing out when the download finished before the wait started, and moving the file to the requested path (#2027)
+- Fixed **`--allowed-domains` launches** failing with "Cannot find default execution context" on pages that embed cross-origin iframes (#2116)
+- Fixed **full-page screenshots** on high-DPI displays being twice the page size with the page in the top-left quarter (#2125)
+- Fixed **selector screenshots** being blank for elements outside the first viewport, after scrolling, or inside iframes (#2126)
+- Fixed **unresponsive tabs** permanently breaking a session; a wedged tab now fails with `page_wedged` and, in a launched browser, is replaced after a second timeout (#2100)
+- Fixed **`--pin-tab`** so another session cannot take a pinned tab with `tab <targetId>` (#2135)
+
+### Contributors
+
+- @Railly
+- @WianBroes
+- @justjavac
+- @aamirhullur
+- @zyz619963502zyz
+
+<!-- release:end -->
+
+## 0.39.3
 
 ### Bug Fixes
 
@@ -27,8 +48,6 @@
 - @Muhtasham
 - @BetterAndBetterII
 - @dwin-gharibi
-
-<!-- release:end -->
 
 ## 0.39.2
 
