@@ -139,8 +139,8 @@ importers:
         specifier: 7.0.102
         version: 7.0.102(zod@4.4.3)
       eve:
-        specifier: ^0.57.0
-        version: 0.57.0(@opentelemetry/api@1.9.0)(ai@7.0.102(zod@4.4.3))
+        specifier: ^0.81.0
+        version: 0.81.0(@opentelemetry/api@1.9.0)(ai@7.0.102(zod@4.4.3))
       typescript:
         specifier: 7.0.2
         version: 7.0.2
@@ -4615,14 +4615,15 @@ packages:
     resolution: {integrity: sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg==}
     engines: {node: '>= 0.6'}
 
-  eve@0.57.0:
-    resolution: {integrity: sha512-dnmCENIVj3cXEE5kKbkhngBag8X/tNwt9YkyTmlwstuNhJmqVlxh5ViymWbIwh2MVZQQAbKyrAxHJ+yw7CIoAg==}
+  eve@0.81.0:
+    resolution: {integrity: sha512-Zz15bJ+r0BWfGEFymdFRwX+LypD383MzF63nGoeedePWcQ8p+yUMuYZJZxHk8tfQnI6AhK7yCyMDLjHbNFp2DA==}
     engines: {node: '>=24'}
     hasBin: true
     peerDependencies:
       '@opentelemetry/api': ^1.0.0
-      ai: ^7.0.93
+      ai: ^7.0.137
       braintrust: ^3.0.0
+      chat: ^4.42.0
       dd-trace: ^6.13.0
       just-bash: ^3.1.0
       microsandbox: ^0.5.0
@@ -4630,6 +4631,8 @@ packages:
       '@opentelemetry/api':
         optional: true
       braintrust:
+        optional: true
+      chat:
         optional: true
       dd-trace:
         optional: true
@@ -6297,7 +6300,7 @@ packages:
   phase@0.5.4:
     resolution: {integrity: sha512-3nCOrMZ/dW1q0nLCbVZBcGW/60TEApcoBPCT7s8SsQ2I0/rHLeSMkxlPhaGfW/yEKgkLkCfmd+YGss65ZwR77Q==}
     engines: {node: 24.x}
-    deprecated: phase is now the scan tool; the runtime library moved to @usephase/core and @usephase/react
+    deprecated: 'phase is now the scan tool; the runtime library moved to @usephase/core and @usephase/react. Run: npx @usephase/codemod@latest migrate-phase-to-usephase .'
     peerDependencies:
       react: '>=18'
     peerDependenciesMeta:
@@ -7188,8 +7191,8 @@ packages:
     resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
     engines: {node: '>=20.18.1'}
 
-  undici@8.9.0:
-    resolution: {integrity: sha512-aWZpUj7XoGonMClx4gdDRfgBjqeA+F473aDmROQQbM9n6PRfK/u1q/a0X4wMTgcHfT8H6fpbt98PFuDUwFg2YA==}
+  undici@8.10.2:
+    resolution: {integrity: sha512-/y4/bH9YNU5hi9NIrpOuvGXFcxrj3CMrV+/AYpowAYTpHn8gX/XPFjNy766FPoYY0miQhdW977JFWKGNhBdwyQ==}
     engines: {node: '>=22.19.0'}
 
   unenv@2.0.0-rc.24:
@@ -11958,11 +11961,11 @@ snapshots:
 
   etag@1.8.1: {}
 
-  eve@0.57.0(@opentelemetry/api@1.9.0)(ai@7.0.102(zod@4.4.3)):
+  eve@0.81.0(@opentelemetry/api@1.9.0)(ai@7.0.102(zod@4.4.3)):
     dependencies:
       ai: 7.0.102(zod@4.4.3)
       nitro: 3.0.260903-beta
-      undici: 8.9.0
+      undici: 8.10.2
     optionalDependencies:
       '@opentelemetry/api': 1.9.0
 
@@ -15326,7 +15329,7 @@ snapshots:
 
   undici@7.29.1: {}
 
-  undici@8.9.0: {}
+  undici@8.10.2: {}
 
   unenv@2.0.0-rc.24:
     dependencies:
