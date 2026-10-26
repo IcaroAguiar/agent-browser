@@ -144,7 +144,6 @@ pub async fn execute(action: &str, cmd: &Value, state: &mut DaemonState) -> Resu
         "screenshot" => capture::screenshot(cmd, state).await,
         "pdf" => capture::pdf(cmd, state).await,
         "close" => chrome::handle_close(state).await,
-        "confirm" => chrome::handle_confirm(cmd, state).await,
         _ => chrome::handle_deny(cmd, state).await,
     }
 }
