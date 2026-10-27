@@ -9891,7 +9891,21 @@ async fn handle_webmcp_list(cmd: &Value, state: &mut DaemonState) -> Result<Valu
     } else if let Some(frame) = cmd.get("frameId").and_then(Value::as_str) {
         tools.retain(|tool| tool.frame_id == frame);
     }
-    Ok(json!({"experimental": true, "untrusted": true, "tools": tools}))
+    let mut resp = json!({"experimental": true, "untrusted": true, "tools": tools});
+    // Saved flows are tools the agent observed on this site, next to the ones
+    // the page declares.
+    if cmd.get("tool").is_none() {
+        let host = match state.browser.as_ref() {
+            Some(mgr) => mgr.get_url().await.ok(),
+            None => None,
+        }
+        .and_then(|u| url::Url::parse(&u).ok())
+        .and_then(|u| u.host_str().map(String::from));
+        if let Some(host) = host {
+            resp["observed"] = json!(super::flow::list_flows(Some(&host)));
+        }
+    }
+    Ok(resp)
 }
 
 async fn wait_for_webmcp_invocation(

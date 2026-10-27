@@ -401,6 +401,38 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
     }
 }
 
+/// Saved flows for the page's site, listed after the tools the page declares.
+fn format_observed_flows(data: &serde_json::Value) -> Option<String> {
+    let flows = data.get("observed")?.as_array().filter(|f| !f.is_empty())?;
+    let mut lines =
+        vec!["Observed by agent-browser (saved flows, not declared by the page):".to_string()];
+    for f in flows {
+        let name = f["name"].as_str().unwrap_or("");
+        let params: Vec<&str> = f["params"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.as_str())
+            .collect();
+        lines.push(format!(
+            "{} [{}]\n  params: {}\n  run: agent-browser flow run {}",
+            name,
+            if f["verifiedAt"].is_null() {
+                "unverified"
+            } else {
+                "verified"
+            },
+            if params.is_empty() {
+                "none".to_string()
+            } else {
+                params.join(", ")
+            },
+            name
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
 fn format_webmcp_tool_text(tool: &serde_json::Value) -> String {
     let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("?");
     let description = tool
@@ -799,10 +831,12 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
             };
             if tools.is_empty() {
                 println!("No WebMCP tools registered on the current page");
-                return;
             }
             for tool in tools {
                 print_with_boundaries(&format_webmcp_tool_text(tool), boundary_origin(tool), opts);
+            }
+            if let Some(observed) = format_observed_flows(data) {
+                println!("{}", observed);
             }
             return;
         }
