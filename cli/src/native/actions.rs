@@ -12537,7 +12537,14 @@ async fn resolve_fetch_paused(
                     body_str.as_bytes(),
                 );
                 let mut headers = vec![];
-                if let Some(ct) = &resp.content_type {
+                // A JSON body with no content type is labeled as JSON, so the
+                // page and HAR capture read it as JSON.
+                let content_type = resp.content_type.clone().or_else(|| {
+                    serde_json::from_str::<Value>(body_str)
+                        .is_ok()
+                        .then(|| "application/json".to_string())
+                });
+                if let Some(ct) = &content_type {
                     headers.push(json!({ "name": "Content-Type", "value": ct }));
                 }
                 if let Some(h) = &resp.headers {
@@ -12545,6 +12552,47 @@ async fn resolve_fetch_paused(
                         headers.push(json!({ "name": k, "value": v }));
                     }
                 }
+                // A mock for a cross-origin API must pass the page's CORS check,
+                // or the page sees a network error instead of the mocked body.
+                let header = |name: &str| {
+                    paused.request_headers.as_ref().and_then(|h| {
+                        h.iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                            .and_then(|(_, v)| v.as_str())
+                            .map(String::from)
+                    })
+                };
+                let has_acao = resp.headers.as_ref().is_some_and(|h| {
+                    h.keys()
+                        .any(|k| k.eq_ignore_ascii_case("access-control-allow-origin"))
+                });
+                let origin = header("origin").or_else(|| {
+                    header("referer")
+                        .and_then(|r| url::Url::parse(&r).ok())
+                        .map(|u| u.origin().ascii_serialization())
+                });
+                let preflight = header("access-control-request-method");
+                if let (false, Some(origin)) = (has_acao, origin) {
+                    headers.push(json!({ "name": "Access-Control-Allow-Origin", "value": origin }));
+                    headers.push(
+                        json!({ "name": "Access-Control-Allow-Credentials", "value": "true" }),
+                    );
+                    if let Some(method) = &preflight {
+                        headers.push(
+                            json!({ "name": "Access-Control-Allow-Methods", "value": method }),
+                        );
+                        if let Some(h) = header("access-control-request-headers") {
+                            headers.push(
+                                json!({ "name": "Access-Control-Allow-Headers", "value": h }),
+                            );
+                        }
+                    }
+                }
+                let (status, encoded) = if preflight.is_some() && !has_acao {
+                    (204, String::new())
+                } else {
+                    (status, encoded)
+                };
 
                 let _ = client
                     .send_command(
