@@ -12228,33 +12228,25 @@ fn mocked_response(
     (status, headers, encoded)
 }
 
-/// Whether two URLs share a registrable domain, close enough without a public
-/// suffix list: `www.example.com` and `api.example.com`, `localhost` on two
-/// ports. IP addresses only match themselves.
+/// Whether two URLs share a registrable domain under the public suffix list:
+/// `www.example.com` and `api.example.com`, or `localhost` on two ports. Hosts
+/// on a shared public suffix such as `github.io` are different sites, and IP
+/// addresses only match themselves.
 fn same_site(a: &str, b: &str) -> bool {
     let host = |u: &str| {
-        url::Url::parse(u)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from))
+        url::Url::parse(u).ok().and_then(|u| {
+            u.host_str()
+                .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+        })
     };
     let (Some(a), Some(b)) = (host(a), host(b)) else {
         return false;
     };
-    let site = |h: &str| {
-        if h.parse::<std::net::IpAddr>().is_ok() || h.starts_with('[') {
-            return h.to_string();
-        }
-        let labels: Vec<&str> = h.trim_end_matches('.').split('.').collect();
-        let country_second_level = labels.len() >= 3
-            && labels[labels.len() - 1].len() == 2
-            && matches!(
-                labels[labels.len() - 2],
-                "com" | "co" | "org" | "net" | "gov" | "gob" | "edu" | "ac"
-            );
-        let keep = if country_second_level { 3 } else { 2 };
-        labels[labels.len().saturating_sub(keep)..].join(".")
-    };
-    site(&a) == site(&b)
+    if a == b {
+        return true;
+    }
+    let site = |h: &str| psl::domain_str(h).map(String::from);
+    matches!((site(&a), site(&b)), (Some(x), Some(y)) if x == y)
 }
 
 fn route_url_matches(pattern: &str, url: &str) -> bool {
@@ -19159,6 +19151,14 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         ));
         assert!(!same_site("https://a.com.ar", "https://b.com.ar"));
         assert!(!same_site("http://127.0.0.1:8770", "http://localhost:8771"));
+        assert!(!same_site(
+            "https://attacker.github.io",
+            "https://victim.github.io/x"
+        ));
+        assert!(same_site(
+            "https://victim.github.io",
+            "https://victim.github.io/x"
+        ));
     }
 
     #[test]
