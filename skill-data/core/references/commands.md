@@ -231,6 +231,21 @@ agent-browser network har start --content none # Sizes and headers only
 agent-browser network har stop [output.har]    # Stop and save HAR
 ```
 
+## Saved flows
+
+```bash
+agent-browser flow start <name>                       # Record a task (starts HAR capture)
+agent-browser flow save [--param k=v]... [--output <id>]  # Keep first-party JSON requests, turn values into params
+agent-browser flow run <name> [--param k=v]...        # Replay over HTTP, no browser needed
+agent-browser flow run <name> --where field=value --fields a,b.c --limit 5  # Return only matching items and fields
+agent-browser flow list [--origin <host>]             # Saved flows, with params and verified state
+```
+
+Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`). Cookies, `authorization` and token or CSRF headers are never saved. A run checks the response shape against the recording; a mismatch fails the run and marks the flow unverified. Non-GET requests need `--allow-write`.
+
+```bash
+```
+
 ## Tabs and Windows
 
 ```bash
