@@ -12149,10 +12149,13 @@ fn collapse_wildcards(pattern: &str) -> String {
 }
 
 /// Status, headers and base64 body for a mocked route response. A mock for a
-/// cross-origin request must pass the page's CORS check, or the page sees a
-/// network error instead of the mocked body.
+/// cross-origin request on the same site (a page on `www.` calling `api.`)
+/// must pass the page's CORS check, or the page sees a network error instead
+/// of the mocked body. Other sites get no CORS headers, so a page from an
+/// unrelated origin cannot read the mock; a route can still set its own.
 fn mocked_response(
     resp: &RouteResponse,
+    url: &str,
     request_headers: Option<&serde_json::Map<String, Value>>,
 ) -> (u16, Vec<Value>, String) {
     let status = resp.status.unwrap_or(200);
@@ -12162,9 +12165,17 @@ fn mocked_response(
         body_str.as_bytes(),
     );
     let mut headers = vec![];
+    let route_sets = |name: &str| {
+        resp.headers
+            .as_ref()
+            .is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case(name)))
+    };
     // A JSON body with no content type is labeled as JSON, so the
     // page and HAR capture read it as JSON.
     let content_type = resp.content_type.clone().or_else(|| {
+        if route_sets("content-type") {
+            return None;
+        }
         serde_json::from_str::<Value>(body_str)
             .is_ok()
             .then(|| "application/json".to_string())
@@ -12185,32 +12196,65 @@ fn mocked_response(
                 .map(String::from)
         })
     };
-    let has_acao = resp.headers.as_ref().is_some_and(|h| {
-        h.keys()
-            .any(|k| k.eq_ignore_ascii_case("access-control-allow-origin"))
-    });
-    let origin = header("origin").or_else(|| {
-        header("referer")
-            .and_then(|r| url::Url::parse(&r).ok())
-            .map(|u| u.origin().ascii_serialization())
-    });
+    let has_acao = route_sets("access-control-allow-origin");
+    let origin = header("origin")
+        .or_else(|| {
+            header("referer")
+                .and_then(|r| url::Url::parse(&r).ok())
+                .map(|u| u.origin().ascii_serialization())
+        })
+        .filter(|o| same_site(o, url));
     let preflight = header("access-control-request-method");
-    if let (false, Some(origin)) = (has_acao, origin) {
-        headers.push(json!({ "name": "Access-Control-Allow-Origin", "value": origin }));
-        headers.push(json!({ "name": "Access-Control-Allow-Credentials", "value": "true" }));
+    if let (false, Some(origin)) = (has_acao, &origin) {
+        let mut add = |name: &str, value: &str| {
+            if !route_sets(name) {
+                headers.push(json!({ "name": name, "value": value }));
+            }
+        };
+        add("Access-Control-Allow-Origin", origin);
+        add("Access-Control-Allow-Credentials", "true");
         if let Some(method) = &preflight {
-            headers.push(json!({ "name": "Access-Control-Allow-Methods", "value": method }));
+            add("Access-Control-Allow-Methods", method);
             if let Some(h) = header("access-control-request-headers") {
-                headers.push(json!({ "name": "Access-Control-Allow-Headers", "value": h }));
+                add("Access-Control-Allow-Headers", &h);
             }
         }
     }
-    let (status, encoded) = if preflight.is_some() && !has_acao {
+    let (status, encoded) = if preflight.is_some() && !has_acao && origin.is_some() {
         (204, String::new())
     } else {
         (status, encoded)
     };
     (status, headers, encoded)
+}
+
+/// Whether two URLs share a registrable domain, close enough without a public
+/// suffix list: `www.example.com` and `api.example.com`, `localhost` on two
+/// ports. IP addresses only match themselves.
+fn same_site(a: &str, b: &str) -> bool {
+    let host = |u: &str| {
+        url::Url::parse(u)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+    };
+    let (Some(a), Some(b)) = (host(a), host(b)) else {
+        return false;
+    };
+    let site = |h: &str| {
+        if h.parse::<std::net::IpAddr>().is_ok() || h.starts_with('[') {
+            return h.to_string();
+        }
+        let labels: Vec<&str> = h.trim_end_matches('.').split('.').collect();
+        let country_second_level = labels.len() >= 3
+            && labels[labels.len() - 1].len() == 2
+            && matches!(
+                labels[labels.len() - 2],
+                "com" | "co" | "org" | "net" | "gov" | "gob" | "edu" | "ac"
+            );
+        let keep = if country_second_level { 3 } else { 2 };
+        labels[labels.len().saturating_sub(keep)..].join(".")
+    };
+    site(&a) == site(&b)
 }
 
 fn route_url_matches(pattern: &str, url: &str) -> bool {
@@ -12374,7 +12418,7 @@ async fn resolve_fetch_paused(
 
             if let Some(ref resp) = route.response {
                 let (status, headers, encoded) =
-                    mocked_response(resp, paused.request_headers.as_ref());
+                    mocked_response(resp, &paused.url, paused.request_headers.as_ref());
                 let _ = client
                     .send_command(
                         "Fetch.fulfillRequest",
@@ -18997,7 +19041,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             headers: None,
         };
         let request = json!({ "Origin": "https://www.example.com" });
-        let (status, headers, body) = mocked_response(&resp, request.as_object());
+        let (status, headers, body) =
+            mocked_response(&resp, "https://api.example.com/items", request.as_object());
         assert_eq!(status, 200);
         assert!(!body.is_empty());
         assert_eq!(
@@ -19014,7 +19059,11 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "Access-Control-Request-Method": "POST",
             "Access-Control-Request-Headers": "content-type,x-client",
         });
-        let (status, headers, body) = mocked_response(&resp, preflight.as_object());
+        let (status, headers, body) = mocked_response(
+            &resp,
+            "https://api.example.com/items",
+            preflight.as_object(),
+        );
         assert_eq!(status, 204);
         assert!(body.is_empty());
         assert_eq!(
@@ -19032,6 +19081,87 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[test]
+    fn test_mocked_response_gives_other_sites_no_cors() {
+        let resp = RouteResponse {
+            status: None,
+            body: Some(r#"{"private":true}"#.to_string()),
+            content_type: None,
+            headers: None,
+        };
+        let request = json!({ "Origin": "https://attacker.test" });
+        let (_, headers, _) =
+            mocked_response(&resp, "https://api.example.com/items", request.as_object());
+        assert!(header_value(&headers, "Access-Control-Allow-Origin").is_none());
+        let preflight = json!({
+            "Origin": "https://attacker.test",
+            "Access-Control-Request-Method": "GET",
+        });
+        let (status, _, _) = mocked_response(
+            &resp,
+            "https://api.example.com/items",
+            preflight.as_object(),
+        );
+        assert_eq!(status, 200);
+    }
+
+    #[test]
+    fn test_mocked_response_does_not_duplicate_route_headers() {
+        let mut own = HashMap::new();
+        own.insert(
+            "Access-Control-Allow-Credentials".to_string(),
+            "true".to_string(),
+        );
+        own.insert(
+            "content-type".to_string(),
+            "application/vnd.api+json".to_string(),
+        );
+        let resp = RouteResponse {
+            status: None,
+            body: Some(r#"{"a":1}"#.to_string()),
+            content_type: None,
+            headers: Some(own),
+        };
+        let request = json!({ "Origin": "https://www.example.com" });
+        let (_, headers, _) =
+            mocked_response(&resp, "https://api.example.com/items", request.as_object());
+        let count = |name: &str| {
+            headers
+                .iter()
+                .filter(|h| {
+                    h["name"]
+                        .as_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                })
+                .count()
+        };
+        assert_eq!(count("Access-Control-Allow-Credentials"), 1);
+        assert_eq!(count("Content-Type"), 1);
+        assert_eq!(count("Access-Control-Allow-Origin"), 1);
+    }
+
+    #[test]
+    fn test_same_site() {
+        assert!(same_site(
+            "https://www.example.com",
+            "https://api.example.com/x"
+        ));
+        assert!(same_site(
+            "http://localhost:8770",
+            "http://localhost:8771/api"
+        ));
+        assert!(same_site(
+            "https://www.example.com.ar",
+            "https://bff.example.com.ar/x"
+        ));
+        assert!(!same_site(
+            "https://attacker.test",
+            "https://api.example.com/x"
+        ));
+        assert!(!same_site("https://a.com.ar", "https://b.com.ar"));
+        assert!(!same_site("http://127.0.0.1:8770", "http://localhost:8771"));
+    }
+
+    #[test]
     fn test_mocked_response_keeps_explicit_cors_and_content_type() {
         let mut own = HashMap::new();
         own.insert("Access-Control-Allow-Origin".to_string(), "*".to_string());
@@ -19042,7 +19172,8 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             headers: Some(own),
         };
         let request = json!({ "Origin": "https://www.example.com" });
-        let (status, headers, _) = mocked_response(&resp, request.as_object());
+        let (status, headers, _) =
+            mocked_response(&resp, "https://api.example.com/items", request.as_object());
         assert_eq!(status, 201);
         assert_eq!(header_value(&headers, "Content-Type"), Some("text/plain"));
         assert_eq!(
@@ -19052,7 +19183,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 .count(),
             1
         );
-        let (_, headers, _) = mocked_response(&resp, None);
+        let (_, headers, _) = mocked_response(&resp, "https://api.example.com/items", None);
         assert!(header_value(&headers, "Access-Control-Allow-Credentials").is_none());
     }
 
