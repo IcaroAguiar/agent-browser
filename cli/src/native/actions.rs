@@ -2934,7 +2934,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     }
 
     // After the drain, so late requests from the previous command keep its tag.
-    state.flow.begin_command(action, cmd);
+    if state.flow.active() {
+        let stable = flow_stable_command(action, cmd, &state.ref_map);
+        state.flow.begin_command(action, &stable);
+    }
 
     // Keep element resolution in sync with the `frame` selection (see
     // element::set_active_frame for why this is mirrored).
@@ -12031,6 +12034,34 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     Ok(response)
 }
 
+/// Snapshot refs only live until the next snapshot, so a recorded command
+/// that targets one is stored as the role and name the ref pointed at.
+fn flow_stable_command(action: &str, cmd: &Value, refs: &super::element::RefMap) -> Value {
+    if !FIND_ACTIONS.contains(&action) {
+        return cmd.clone();
+    }
+    let Some(entry) = cmd
+        .get("selector")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.strip_prefix('@'))
+        .and_then(|r| refs.get(r))
+        .filter(|e| !e.role.is_empty() && !e.name.is_empty())
+    else {
+        return cmd.clone();
+    };
+    let mut out = json!({
+        "action": "getbyrole",
+        "role": entry.role,
+        "name": entry.name,
+        "exact": true,
+        "subaction": action,
+    });
+    if let Some(v) = cmd.get("value") {
+        out["value"] = v.clone();
+    }
+    out
+}
+
 /// The session route that would answer this request in the page, if any.
 async fn flow_routed_response(
     state: &DaemonState,
@@ -12148,7 +12179,19 @@ async fn run_flow_replay(
     for (i, c) in commands.into_iter().enumerate() {
         let mut c = c;
         c["id"] = json!(format!("flow-replay-{}", i + 1));
-        let resp = Box::pin(execute_command(&c, state)).await;
+        // A page opened by the replay may still be rendering the element.
+        let resp = loop {
+            let resp = Box::pin(execute_command(&c, state)).await;
+            let missing = resp
+                .get("error")
+                .and_then(|e| e.as_str())
+                .is_some_and(|e| e.contains("No element found") || e.contains("Element not found"));
+            if !missing || std::time::Instant::now() >= started + std::time::Duration::from_secs(20)
+            {
+                break resp;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        };
         if resp.get("success") != Some(&json!(true)) {
             failed = Some(format!(
                 "replaying command {} failed: {}",

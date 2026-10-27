@@ -325,7 +325,7 @@ fn start_url(commands: &[(u64, Value)]) -> Option<String> {
 
 fn describe_command(cmd: &Value) -> String {
     let action = cmd.get("action").and_then(|a| a.as_str()).unwrap_or("?");
-    let target = ["url", "selector", "text", "value"]
+    let target = ["url", "selector", "name", "text", "value"]
         .iter()
         .find_map(|k| cmd.get(*k).and_then(|v| v.as_str()));
     match target {
@@ -432,6 +432,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
                 | "check"
                 | "uncheck"
                 | "submit"
+                | "getbyrole"
         );
         if requests.is_empty() && interactive {
             let reason = if input.login_wall && index + 1 == input.recorder.commands.len() {
@@ -1478,24 +1479,37 @@ pub fn replay_commands(
 }
 
 /// The entry captured during a replay that stands for a recorded request:
-/// the same URL, else the same method, host and path.
+/// same method, host and path, and for requests with a body the same body or
+/// GraphQL operation (one endpoint serves every query). An exact URL wins.
 pub fn replay_match<'a>(entries: &'a [HarEntry], req: &PreparedRequest) -> Option<&'a HarEntry> {
     let key = |u: &str| {
         url::Url::parse(u)
             .ok()
             .map(|u| (u.host_str().unwrap_or("").to_string(), u.path().to_string()))
     };
+    let operation = |b: Option<&str>| {
+        b.and_then(|b| serde_json::from_str::<Value>(b).ok())
+            .and_then(|v| v["operationName"].as_str().map(String::from))
+    };
     let want = key(&req.url);
-    entries
+    let want_op = operation(req.body.as_deref());
+    let same_body = |e: &HarEntry| match &req.body {
+        None => true,
+        Some(b) => {
+            e.post_data.as_deref() == Some(b.as_str())
+                || (want_op.is_some() && operation(e.post_data.as_deref()) == want_op)
+        }
+    };
+    let candidates: Vec<&HarEntry> = entries
         .iter()
         .rev()
-        .find(|e| e.method == req.method && e.url == req.url)
-        .or_else(|| {
-            entries
-                .iter()
-                .rev()
-                .find(|e| e.method == req.method && key(&e.url) == want)
-        })
+        .filter(|e| e.method == req.method && key(&e.url) == want && same_body(e))
+        .collect();
+    candidates
+        .iter()
+        .find(|e| e.url == req.url)
+        .or_else(|| candidates.first())
+        .copied()
 }
 
 pub fn replay_result(
@@ -2111,5 +2125,29 @@ mod tests {
             "POST",
             Some(r#"{"query":"mutation buy { order }"}"#)
         ));
+    }
+
+    #[test]
+    fn replay_match_tells_graphql_operations_apart() {
+        let mut a = entry(
+            "a",
+            "https://api.site.example/graphql",
+            "Fetch",
+            "application/json",
+            "{}",
+        );
+        a.method = "POST".to_string();
+        a.post_data = Some(r#"{"operationName":"appConfig","variables":{}}"#.to_string());
+        let mut b = a.clone();
+        b.request_id = "b".to_string();
+        b.post_data = Some(r#"{"operationName":"positions","variables":{"t":2}}"#.to_string());
+        let mut req = prepared("s1r1");
+        req.method = "POST".to_string();
+        req.url = "https://api.site.example/graphql".to_string();
+        req.body = Some(r#"{"operationName":"positions","variables":{"t":1}}"#.to_string());
+        let entries = vec![b, a];
+        assert_eq!(replay_match(&entries, &req).unwrap().request_id, "b");
+        req.body = Some(r#"{"operationName":"other"}"#.to_string());
+        assert!(replay_match(&entries, &req).is_none());
     }
 }
