@@ -28,7 +28,7 @@ The response can also list saved flows for the site. A saved flow is a task reco
 agent-browser flow run <name> --param key=value --where field=value --fields a,b.c --limit 5
 ```
 
-If the run fails, the site changed: the flow is marked unverified, so continue with the UI. When you finish a task you or the user will repeat, record it so the next run skips the browser:
+A run tries direct HTTP first, then the same request from the page, then a replay of the recorded commands. If every way fails, or the response no longer has the recorded shape, the flow is marked unverified, so continue with the UI. When you finish a task you or the user will repeat, record it so the next run skips the browser:
 
 ```bash
 agent-browser flow start <name>     # before the first command of the task

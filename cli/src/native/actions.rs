@@ -11872,20 +11872,40 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let client = super::flow::http_client()?;
     let mut results = Vec::new();
     for req in &requests {
-        let cookie = match state.browser.as_ref() {
-            Some(mgr) => match mgr.active_session_id() {
-                Ok(sid) => cookies::get_cookies(&mgr.client, sid, Some(vec![req.url.clone()]))
-                    .await
-                    .ok()
-                    .map(|c| super::flow::cookie_header(&c)),
-                Err(_) => None,
-            },
-            None => None,
-        };
-        let result = super::flow::run_http(&client, req, cookie.as_deref()).await;
-        let failed = !result.ok;
-        results.push(result);
-        if failed {
+        let mut done = false;
+        for tier in super::flow::tiers_for(&flow, &req.id) {
+            let result = match tier {
+                "http" => {
+                    let cookie = match state.browser.as_ref() {
+                        Some(mgr) => match mgr.active_session_id() {
+                            Ok(sid) => {
+                                cookies::get_cookies(&mgr.client, sid, Some(vec![req.url.clone()]))
+                                    .await
+                                    .ok()
+                                    .map(|c| super::flow::cookie_header(&c))
+                            }
+                            Err(_) => None,
+                        },
+                        None => None,
+                    };
+                    let routed = flow_routed_response(state, &req.url).await;
+                    super::flow::run_http(&client, req, cookie.as_deref(), routed).await
+                }
+                "page" => run_flow_in_page(&flow, req, state).await,
+                _ => run_flow_replay(&flow, &params, req, state).await,
+            };
+            let (ok, drift) = (result.ok, result.drift);
+            // A write the site accepted must not be sent again by a lower tier.
+            let accepted_write = super::flow::is_write(&req.method)
+                && result.status.is_some_and(|st| (200..300).contains(&st));
+            results.push(result);
+            // A rejected input fails the same way on every tier.
+            if ok || !drift || accepted_write {
+                done = ok;
+                break;
+            }
+        }
+        if !done {
             break;
         }
     }
@@ -11922,13 +11942,19 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     );
     super::flow::write_flow(&flow)?;
     if response["ok"] != json!(true) {
-        let failure = results.iter().find(|r| !r.ok);
+        let failure = results.iter().rev().find(|r| !r.ok);
         let reason = failure.and_then(|r| r.reason.clone()).unwrap_or_default();
         let step = failure.map(|r| r.step).unwrap_or(0);
-        if failure.is_some_and(|r| r.drift) {
+        if results.iter().any(|r| r.step == step && r.drift) {
+            let tried = results
+                .iter()
+                .filter(|r| r.step == step)
+                .map(|r| format!("{}: {}", r.tier, r.reason.as_deref().unwrap_or("ok")))
+                .collect::<Vec<_>>()
+                .join("; ");
             return Err(format!(
-                "flow '{}' failed over HTTP at step {}: {}. The flow is now marked unverified; drive the browser for this task instead",
-                name, step, reason
+                "flow '{}' failed at step {} ({}). The flow is now marked unverified; drive the browser for this task instead",
+                name, step, tried
             ));
         }
         let examples = flow["params"]
@@ -11946,12 +11972,174 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                     .join(" ")
             })
             .unwrap_or_default();
+        if failure.and_then(|r| r.status).is_none() {
+            return Err(format!(
+                "flow '{}' failed at step {}: {}",
+                name, step, reason
+            ));
+        }
         return Err(format!(
             "flow '{}' failed at step {}: {}. The site likely rejected the param values; the recorded run used {}",
             name, step, reason, examples
         ));
     }
     Ok(response)
+}
+
+/// The session route that would answer this request in the page, if any.
+async fn flow_routed_response(
+    state: &DaemonState,
+    url: &str,
+) -> Option<super::flow::RoutedResponse> {
+    let routes = state.routes.read().await;
+    let route = routes.iter().find(|r| {
+        route_url_matches(&r.url_pattern, url)
+            && (r.resource_types.is_empty()
+                || r.resource_types
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case("fetch") || t.eq_ignore_ascii_case("xhr")))
+    })?;
+    if route.abort {
+        return Some(super::flow::RoutedResponse {
+            abort: true,
+            status: 0,
+            body: String::new(),
+        });
+    }
+    let resp = route.response.as_ref()?;
+    Some(super::flow::RoutedResponse {
+        abort: false,
+        status: resp.status.unwrap_or(200),
+        body: resp.body.clone().unwrap_or_default(),
+    })
+}
+
+async fn flow_ensure_browser(state: &mut DaemonState) -> Result<(), String> {
+    if state.browser.is_none() {
+        auto_launch(state, Vec::new()).await?;
+        state.webmcp_enabled = launch_options_from_env().webmcp;
+    }
+    Ok(())
+}
+
+/// Put the tab on the flow's site, so an in-page request is same-site.
+async fn flow_ensure_on_site(flow: &Value, state: &mut DaemonState) -> Result<(), String> {
+    flow_ensure_browser(state).await?;
+    let start = flow["startUrl"].as_str().unwrap_or("");
+    let want = super::flow::base_domain(flow["origin"].as_str().unwrap_or(""));
+    let current = match state.browser.as_ref() {
+        Some(mgr) => mgr.get_url().await.ok(),
+        None => None,
+    };
+    let on_site = current
+        .as_deref()
+        .and_then(|u| url::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(super::flow::base_domain))
+        .is_some_and(|h| h == want);
+    if on_site {
+        return Ok(());
+    }
+    let resp = Box::pin(execute_command(
+        &json!({ "id": "flow-tier", "action": "navigate", "url": start }),
+        state,
+    ))
+    .await;
+    if resp.get("success") != Some(&json!(true)) {
+        return Err(resp
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("could not open the flow's start URL")
+            .to_string());
+    }
+    Ok(())
+}
+
+async fn run_flow_in_page(
+    flow: &Value,
+    req: &super::flow::PreparedRequest,
+    state: &mut DaemonState,
+) -> super::flow::TierResult {
+    let started = std::time::Instant::now();
+    let value = match flow_ensure_on_site(flow, state).await {
+        Ok(()) => match state.browser.as_ref() {
+            Some(mgr) => {
+                mgr.evaluate(&super::flow::page_fetch_script(req), None)
+                    .await
+            }
+            None => Err("Browser not launched".to_string()),
+        },
+        Err(e) => Err(e),
+    };
+    super::flow::page_result(req, started, value)
+}
+
+async fn run_flow_replay(
+    flow: &Value,
+    params: &[(String, String)],
+    req: &super::flow::PreparedRequest,
+    state: &mut DaemonState,
+) -> super::flow::TierResult {
+    let started = std::time::Instant::now();
+    if let Err(e) = flow_ensure_browser(state).await {
+        return super::flow::replay_failed(req, started, e);
+    }
+    let started_har = !state.har_recording;
+    if started_har {
+        if let Err(e) = handle_har_start(&json!({}), state).await {
+            return super::flow::replay_failed(req, started, e);
+        }
+    }
+    let before = state.har_entries.len();
+    let mut failed = None;
+    let commands = match super::flow::replay_commands(flow, params) {
+        Ok(c) => c,
+        Err(e) => {
+            if started_har {
+                state.har_recording = false;
+            }
+            return super::flow::replay_unavailable(req, started, e);
+        }
+    };
+    for (i, c) in commands.into_iter().enumerate() {
+        let mut c = c;
+        c["id"] = json!(format!("flow-replay-{}", i + 1));
+        let resp = Box::pin(execute_command(&c, state)).await;
+        if resp.get("success") != Some(&json!(true)) {
+            failed = Some(format!(
+                "replaying command {} failed: {}",
+                i + 1,
+                resp.get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown error")
+            ));
+            break;
+        }
+    }
+    // Bodies arrive on later event drains; wait within the request timeout.
+    let deadline = started + std::time::Duration::from_secs(20);
+    let result = loop {
+        if let Some(reason) = failed.take() {
+            break super::flow::replay_failed(req, started, reason);
+        }
+        let _ = state.drain_cdp_events_background().await;
+        let entry = super::flow::replay_match(
+            &state.har_entries[before.min(state.har_entries.len())..],
+            req,
+        );
+        let ready = entry.is_some_and(|e| {
+            e.response_body.is_some() || e.status.is_some_and(|s| !(200..300).contains(&s))
+        });
+        if ready || std::time::Instant::now() >= deadline {
+            break super::flow::replay_result(req, started, entry);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    if started_har {
+        state.har_recording = false;
+        state.har_entries.clear();
+        state.har_body_total_bytes = 0;
+    }
+    result
 }
 
 /// After a navigation, tell the agent which saved flows exist for the page's

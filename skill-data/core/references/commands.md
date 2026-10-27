@@ -236,15 +236,12 @@ agent-browser network har stop [output.har]    # Stop and save HAR
 ```bash
 agent-browser flow start <name>                       # Record a task (starts HAR capture)
 agent-browser flow save [--param k=v]... [--output <id>]  # Keep first-party JSON requests, turn values into params
-agent-browser flow run <name> [--param k=v]...        # Replay over HTTP, no browser needed
+agent-browser flow run <name> [--param k=v]...        # Replay over HTTP, falling back to the page
 agent-browser flow run <name> --where field=value --fields a,b.c --limit 5  # Return only matching items and fields
 agent-browser flow list [--origin <host>]             # Saved flows, with params and verified state
 ```
 
-Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`). Cookies, `authorization` and token or CSRF headers are never saved. A run checks the response shape against the recording; a mismatch fails the run and marks the flow unverified. Non-GET requests need `--allow-write`.
-
-```bash
-```
+Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`). Cookies, `authorization` and token or CSRF headers are never saved. A run tries direct HTTP, then the request from the page, then a replay of the recorded commands, and starts the next run at the tier that worked. Every tier checks the response shape against the recording; a mismatch marks the flow unverified. Non-GET requests need `--allow-write`.
 
 ## Tabs and Windows
 

@@ -865,6 +865,8 @@ pub fn is_write(method: &str) -> bool {
     !matches!(method, "GET" | "HEAD" | "OPTIONS")
 }
 
+pub const TIERS: &[&str] = &["http", "page", "replay"];
+
 pub struct TierResult {
     pub id: String,
     pub step: usize,
@@ -875,6 +877,44 @@ pub struct TierResult {
     pub ms: u128,
     /// The failure says the site or its gate changed, not that the inputs were wrong.
     pub drift: bool,
+    /// The response came back with a different shape than the recording.
+    pub shape_changed: bool,
+    pub tier: &'static str,
+}
+
+impl TierResult {
+    fn failed(req: &PreparedRequest, tier: &'static str, ms: u128, f: Failure) -> TierResult {
+        TierResult {
+            id: req.id.clone(),
+            step: req.step,
+            ok: false,
+            status: f.status,
+            reason: Some(f.reason),
+            body: None,
+            ms,
+            drift: f.drift,
+            shape_changed: f.shape_changed,
+            tier,
+        }
+    }
+}
+
+pub struct Failure {
+    pub status: Option<u16>,
+    pub reason: String,
+    pub drift: bool,
+    pub shape_changed: bool,
+}
+
+impl Failure {
+    fn new(drift: bool, status: Option<u16>, reason: String) -> Failure {
+        Failure {
+            status,
+            reason,
+            drift,
+            shape_changed: false,
+        }
+    }
 }
 
 fn looks_like_challenge(body: &str) -> bool {
@@ -894,27 +934,107 @@ fn looks_like_challenge(body: &str) -> bool {
     .any(|m| head.contains(m))
 }
 
+/// Judge a response the same way on every tier: blocked, rejected input,
+/// changed shape, or data.
+pub fn check_response(req: &PreparedRequest, status: u16, text: &str) -> Result<Value, Failure> {
+    if matches!(status, 401 | 403 | 407 | 429) {
+        return Err(Failure::new(true, Some(status), format!("HTTP {}", status)));
+    }
+    if !(200..300).contains(&status) {
+        return Err(Failure::new(
+            false,
+            Some(status),
+            format!("HTTP {}", status),
+        ));
+    }
+    if looks_like_challenge(text) {
+        return Err(Failure::new(
+            true,
+            Some(status),
+            "bot challenge page instead of data".to_string(),
+        ));
+    }
+    let parsed: Value = serde_json::from_str(text)
+        .map_err(|_| Failure::new(true, Some(status), "response is not JSON".to_string()))?;
+    if let Err(reason) = signature_matches(&req.expect["signature"], &signature(&parsed)) {
+        return Err(Failure {
+            status: Some(status),
+            reason: format!("response shape changed: {}", reason),
+            drift: true,
+            shape_changed: true,
+        });
+    }
+    Ok(parsed)
+}
+
+pub fn tier_result(
+    req: &PreparedRequest,
+    tier: &'static str,
+    started: Instant,
+    outcome: Result<(u16, String), Failure>,
+) -> TierResult {
+    let ms = started.elapsed().as_millis();
+    let checked = outcome
+        .and_then(|(status, text)| check_response(req, status, &text).map(|body| (status, body)));
+    match checked {
+        Ok((status, body)) => TierResult {
+            id: req.id.clone(),
+            step: req.step,
+            ok: true,
+            status: Some(status),
+            reason: None,
+            body: Some(body),
+            ms,
+            drift: false,
+            shape_changed: false,
+            tier,
+        },
+        Err(f) => TierResult::failed(req, tier, ms, f),
+    }
+}
+
+/// A session route (`network route`) that matches the request answers it on
+/// the HTTP tier too, so mocks apply to the whole session.
+pub struct RoutedResponse {
+    pub abort: bool,
+    pub status: u16,
+    pub body: String,
+}
+
 /// Tier 1: send the request directly, with cookies from the live session.
 pub async fn run_http(
     client: &reqwest::Client,
     req: &PreparedRequest,
     cookie_header: Option<&str>,
+    routed: Option<RoutedResponse>,
 ) -> TierResult {
     let started = Instant::now();
-    let fail_as = |drift: bool, status: Option<u16>, reason: String| TierResult {
-        id: req.id.clone(),
-        step: req.step,
-        ok: false,
-        status,
-        reason: Some(reason),
-        body: None,
-        ms: started.elapsed().as_millis(),
-        drift,
-    };
-    let fail = |status: Option<u16>, reason: String| fail_as(true, status, reason);
+    if let Some(r) = routed {
+        let outcome = if r.abort {
+            Err(Failure::new(
+                false,
+                None,
+                "request aborted by a session route".to_string(),
+            ))
+        } else {
+            Ok((r.status, r.body))
+        };
+        return tier_result(req, "http", started, outcome);
+    }
     let method = match reqwest::Method::from_bytes(req.method.as_bytes()) {
         Ok(m) => m,
-        Err(_) => return fail(None, format!("unsupported method {}", req.method)),
+        Err(_) => {
+            return tier_result(
+                req,
+                "http",
+                started,
+                Err(Failure::new(
+                    true,
+                    None,
+                    format!("unsupported method {}", req.method),
+                )),
+            )
+        }
     };
     let mut builder = client.request(method, &req.url);
     for (k, v) in &req.headers {
@@ -926,44 +1046,219 @@ pub async fn run_http(
     if let Some(body) = &req.body {
         builder = builder.body(body.clone());
     }
-    let resp = match builder.send().await {
-        Ok(r) => r,
-        Err(e) => return fail_as(false, None, format!("request failed: {}", e)),
+    let outcome = match builder.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            resp.text().await.map(|t| (status, t)).map_err(|e| {
+                Failure::new(true, Some(status), format!("could not read body: {}", e))
+            })
+        }
+        Err(e) => Err(Failure::new(false, None, format!("request failed: {}", e))),
     };
-    let status = resp.status().as_u16();
-    let text = match resp.text().await {
-        Ok(t) => t,
-        Err(e) => return fail(Some(status), format!("could not read body: {}", e)),
+    tier_result(req, "http", started, outcome)
+}
+
+/// Tier 2: the page sends the request itself, so the browser adds its own
+/// cookies, client hints and any headers the site's scripts would not.
+pub fn page_fetch_script(req: &PreparedRequest) -> String {
+    // Headers the browser sets itself. Sending them as app headers turns the
+    // request into a CORS preflight the site never allowed.
+    let browser_set = |k: &str| {
+        let k = k.to_ascii_lowercase();
+        k.starts_with("sec-")
+            || matches!(
+                k.as_str(),
+                "user-agent" | "referer" | "origin" | "accept-language" | "priority" | "dnt"
+            )
     };
-    if matches!(status, 401 | 403 | 407 | 429) {
-        return fail(Some(status), format!("HTTP {}", status));
-    }
-    if !(200..300).contains(&status) {
-        return fail_as(false, Some(status), format!("HTTP {}", status));
-    }
-    if looks_like_challenge(&text) {
-        return fail(
-            Some(status),
-            "bot challenge page instead of data".to_string(),
-        );
-    }
-    let parsed: Value = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => return fail(Some(status), "response is not JSON".to_string()),
+    let headers: Map<String, Value> = req
+        .headers
+        .iter()
+        .filter(|(k, _)| !browser_set(k))
+        .map(|(k, v)| (k.clone(), json!(v)))
+        .collect();
+    let init = json!({
+        "method": req.method,
+        "headers": headers,
+        "body": req.body,
+    });
+    // Cross-origin APIs differ on credentials: some need cookies, some reject
+    // a credentialed request outright. Try with, then without.
+    format!(
+        "(async () => {{ const u = {url}, i = {init}; \
+         let r; try {{ r = await fetch(u, {{ ...i, credentials: 'include' }}); }} \
+         catch (e) {{ r = await fetch(u, i); }} \
+         return {{ status: r.status, text: await r.text() }}; }})()",
+        url = json!(req.url),
+        init = init
+    )
+}
+
+pub fn page_result(
+    req: &PreparedRequest,
+    started: Instant,
+    value: Result<Value, String>,
+) -> TierResult {
+    let outcome = match value {
+        Ok(v) => match (v["status"].as_u64(), v["text"].as_str()) {
+            (Some(status), Some(text)) => Ok((status as u16, text.to_string())),
+            _ => Err(Failure::new(
+                true,
+                None,
+                "in-page fetch returned no response".to_string(),
+            )),
+        },
+        Err(e) => Err(Failure::new(
+            true,
+            None,
+            format!("in-page fetch failed: {}", e),
+        )),
     };
-    if let Err(reason) = signature_matches(&req.expect["signature"], &signature(&parsed)) {
-        return fail(Some(status), format!("response shape changed: {}", reason));
+    tier_result(req, "page", started, outcome)
+}
+
+/// Tier 3: the recorded commands with the run's params swapped in. A param
+/// whose recorded value no command contains cannot be replayed: the browser
+/// would answer with the recorded value instead.
+pub fn replay_commands(
+    flow: &Value,
+    cmd_params: &[(String, String)],
+) -> Result<Vec<Value>, String> {
+    let swaps: Vec<(String, String)> = flow["params"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let name = p["name"].as_str()?;
+            let example = p["example"].as_str()?;
+            let value = cmd_params.iter().find(|(k, _)| k == name)?.1.clone();
+            (!example.is_empty() && example != value).then(|| (example.to_string(), value))
+        })
+        .collect();
+    let recorded = serde_json::to_string(
+        &flow["steps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|s| s["command"].clone())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_default();
+    if let Some((from, _)) = swaps.iter().find(|(from, _)| {
+        !recorded.contains(from.as_str()) && !recorded.contains(urlencoding::encode(from).as_ref())
+    }) {
+        let name = flow["params"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| p["example"].as_str() == Some(from.as_str()))
+            .and_then(|p| p["name"].as_str())
+            .unwrap_or("?");
+        return Err(format!(
+            "param '{}' is not in the recorded commands, so a replay would return the recorded value {}",
+            name, from
+        ));
     }
-    TierResult {
-        id: req.id.clone(),
-        step: req.step,
-        ok: true,
-        status: Some(status),
-        reason: None,
-        body: Some(parsed),
-        ms: started.elapsed().as_millis(),
-        drift: false,
-    }
+    Ok(flow["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            let mut text = serde_json::to_string(&s["command"]).ok()?;
+            for (from, to) in &swaps {
+                text = text.replace(from.as_str(), to);
+                let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
+                if ef != *from {
+                    text = text.replace(ef.as_ref(), et.as_ref());
+                }
+            }
+            serde_json::from_str(&text).ok()
+        })
+        .collect())
+}
+
+/// The entry captured during a replay that stands for a recorded request:
+/// the same URL, else the same method, host and path.
+pub fn replay_match<'a>(entries: &'a [HarEntry], req: &PreparedRequest) -> Option<&'a HarEntry> {
+    let key = |u: &str| {
+        url::Url::parse(u)
+            .ok()
+            .map(|u| (u.host_str().unwrap_or("").to_string(), u.path().to_string()))
+    };
+    let want = key(&req.url);
+    entries
+        .iter()
+        .rev()
+        .find(|e| e.method == req.method && e.url == req.url)
+        .or_else(|| {
+            entries
+                .iter()
+                .rev()
+                .find(|e| e.method == req.method && key(&e.url) == want)
+        })
+}
+
+pub fn replay_result(
+    req: &PreparedRequest,
+    started: Instant,
+    entry: Option<&HarEntry>,
+) -> TierResult {
+    let outcome = match entry {
+        None => Err(Failure::new(
+            true,
+            None,
+            "replaying the recorded commands did not send this request".to_string(),
+        )),
+        Some(e) => match (e.status, e.response_body.as_deref()) {
+            (Some(status), Some(body)) if !e.response_body_base64 => {
+                Ok((status as u16, body.to_string()))
+            }
+            (Some(status), _) => Err(Failure::new(
+                true,
+                Some(status as u16),
+                "the replayed request has no readable body".to_string(),
+            )),
+            _ => Err(Failure::new(
+                true,
+                None,
+                "the replayed request got no response".to_string(),
+            )),
+        },
+    };
+    tier_result(req, "replay", started, outcome)
+}
+
+pub fn replay_failed(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
+    tier_result(
+        req,
+        "replay",
+        started,
+        Err(Failure::new(true, None, reason)),
+    )
+}
+
+/// The replay tier cannot express this run; that says nothing about the site.
+pub fn replay_unavailable(req: &PreparedRequest, started: Instant, reason: String) -> TierResult {
+    tier_result(
+        req,
+        "replay",
+        started,
+        Err(Failure::new(false, None, reason)),
+    )
+}
+
+/// Tiers to try for a request, starting from the one that last worked.
+pub fn tiers_for(flow: &Value, id: &str) -> Vec<&'static str> {
+    let preferred = flow["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s["requests"].as_array().into_iter().flatten())
+        .find(|r| r["id"] == id)
+        .and_then(|r| r["tier"].as_str())
+        .and_then(|t| TIERS.iter().position(|x| *x == t))
+        .unwrap_or(0);
+    TIERS[preferred..].to_vec()
 }
 
 pub fn http_client() -> Result<reqwest::Client, String> {
@@ -981,49 +1276,90 @@ pub fn cookie_header(cookies: &[super::cookies::Cookie]) -> String {
         .join("; ")
 }
 
-/// Fold tier results into the run response, and stamp the flow when every
-/// request passed.
+/// Fold tier results into the run response. `attempts` holds every tier
+/// tried, in order; the last attempt per request is the one that counts.
+/// The flow is verified only when every request came back with the recorded
+/// shape and no tier saw that shape change.
 pub fn finish_run(
     flow: &mut Value,
-    results: &[TierResult],
+    attempts: &[TierResult],
     now: &str,
     total_ms: u128,
     shape: &Shape,
 ) -> Value {
-    let all_ok = !results.is_empty() && results.iter().all(|r| r.ok);
-    if all_ok {
+    let mut last: Vec<&TierResult> = Vec::new();
+    for a in attempts {
+        match last.iter().position(|r| r.id == a.id) {
+            Some(i) => last[i] = a,
+            None => last.push(a),
+        }
+    }
+    let all_ok = !last.is_empty() && last.iter().all(|r| r.ok);
+    let shape_changed = attempts.iter().find(|a| a.shape_changed);
+    if all_ok && shape_changed.is_none() {
         flow["verifiedAt"] = json!(now);
-    } else if results.iter().any(|r| !r.ok && r.drift) {
+    } else if shape_changed.is_some() || (!all_ok && attempts.iter().any(|r| !r.ok && r.drift)) {
         flow["verifiedAt"] = Value::Null;
     }
+    // Remember the tier that worked, so the next run starts there.
+    for r in last.iter().filter(|r| r.ok) {
+        if let Some(steps) = flow["steps"].as_array_mut() {
+            for req in steps
+                .iter_mut()
+                .flat_map(|s| s["requests"].as_array_mut().into_iter().flatten())
+                .filter(|req| req["id"] == r.id.as_str())
+            {
+                if r.tier == TIERS[0] {
+                    if let Some(o) = req.as_object_mut() {
+                        o.remove("tier");
+                    }
+                } else {
+                    req["tier"] = json!(r.tier);
+                }
+            }
+        }
+    }
     let output_id = flow["output"].as_str().unwrap_or("").to_string();
-    let output = results
+    let output = last
         .iter()
-        .find(|r| r.id == output_id)
+        .find(|r| r.id == output_id && r.ok)
         .and_then(|r| r.body.clone())
         .map(|b| apply_shape(b, shape));
-    let steps: Vec<Value> = results
+    let steps: Vec<Value> = last
         .iter()
         .map(|r| {
-            json!({
+            let fell_back: Vec<Value> = attempts
+                .iter()
+                .filter(|a| a.id == r.id && !std::ptr::eq(*a, *r))
+                .map(|a| json!({ "tier": a.tier, "error": a.reason }))
+                .collect();
+            let mut step = json!({
                 "id": r.id,
                 "step": r.step,
-                "tier": if r.ok { json!("http") } else { Value::Null },
+                "tier": if r.ok { json!(r.tier) } else { Value::Null },
                 "status": r.status,
                 "ms": r.ms,
                 "error": r.reason,
-            })
+            });
+            if !fell_back.is_empty() {
+                step["fellBack"] = json!(fell_back);
+            }
+            step
         })
         .collect();
-    json!({
+    let mut response = json!({
         "name": flow["name"],
         "origin": flow["origin"],
         "ok": all_ok,
-        "verified": all_ok,
+        "verified": all_ok && shape_changed.is_none(),
         "ms": total_ms,
         "steps": steps,
         "data": output,
-    })
+    });
+    if let Some(a) = shape_changed {
+        response["drift"] = json!({ "tier": a.tier, "step": a.step, "reason": a.reason });
+    }
+    response
 }
 
 #[cfg(test)]
@@ -1230,5 +1566,129 @@ mod tests {
         r.begin_command("click", &json!({ "id": "9", "action": "click" }));
         assert_eq!(r.commands.len(), 1);
         assert!(r.commands[0].1.get("id").is_none());
+    }
+
+    fn prepared(id: &str) -> PreparedRequest {
+        PreparedRequest {
+            id: id.to_string(),
+            step: 1,
+            method: "GET".to_string(),
+            url: "https://api.site.example/m?film=Film".to_string(),
+            headers: vec![
+                ("User-Agent".to_string(), "x".to_string()),
+                ("sec-ch-ua".to_string(), "x".to_string()),
+                ("country".to_string(), "AR".to_string()),
+            ],
+            body: None,
+            expect: json!({ "signature": signature(&json!({ "data": [{ "id": 1 }] })) }),
+        }
+    }
+
+    fn attempt(
+        id: &str,
+        tier: &'static str,
+        outcome: Result<(u16, String), Failure>,
+    ) -> TierResult {
+        tier_result(&prepared(id), tier, Instant::now(), outcome)
+    }
+
+    #[test]
+    fn check_response_separates_blocks_inputs_and_shape_changes() {
+        let req = prepared("s1r1");
+        let blocked = check_response(&req, 403, "").unwrap_err();
+        assert!(blocked.drift && !blocked.shape_changed);
+        let rejected = check_response(&req, 400, "{}").unwrap_err();
+        assert!(!rejected.drift);
+        let moved = check_response(&req, 200, r#"{"items":[]}"#).unwrap_err();
+        assert!(moved.drift && moved.shape_changed);
+        assert!(check_response(&req, 200, r#"{"data":[{"id":2}]}"#).is_ok());
+    }
+
+    #[test]
+    fn a_blocked_tier_falls_back_and_the_flow_stays_verified() {
+        let mut flow = json!({
+            "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": null,
+            "steps": [{ "requests": [{ "id": "s1r1" }] }],
+        });
+        let attempts = vec![
+            attempt("s1r1", "http", Ok((403, String::new()))),
+            attempt(
+                "s1r1",
+                "page",
+                Ok((200, r#"{"data":[{"id":1}]}"#.to_string())),
+            ),
+        ];
+        let out = finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
+        assert_eq!(out["verified"], true);
+        assert_eq!(out["steps"][0]["tier"], "page");
+        assert_eq!(out["steps"][0]["fellBack"][0]["tier"], "http");
+        assert_eq!(flow["verifiedAt"], "now");
+        assert_eq!(flow["steps"][0]["requests"][0]["tier"], "page");
+        assert_eq!(tiers_for(&flow, "s1r1"), vec!["page", "replay"]);
+    }
+
+    #[test]
+    fn a_changed_shape_marks_the_flow_unverified_even_if_a_lower_tier_answers() {
+        let mut flow = json!({
+            "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": "before",
+            "steps": [{ "requests": [{ "id": "s1r1" }] }],
+        });
+        let attempts = vec![
+            attempt("s1r1", "http", Ok((200, r#"{"items":[]}"#.to_string()))),
+            attempt(
+                "s1r1",
+                "page",
+                Ok((200, r#"{"data":[{"id":1}]}"#.to_string())),
+            ),
+        ];
+        let out = finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["verified"], false);
+        assert_eq!(out["drift"]["tier"], "http");
+        assert_eq!(flow["verifiedAt"], Value::Null);
+    }
+
+    #[test]
+    fn a_rejected_input_keeps_the_flow_verified() {
+        let mut flow = json!({
+            "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": "before",
+            "steps": [{ "requests": [{ "id": "s1r1" }] }],
+        });
+        let attempts = vec![attempt("s1r1", "http", Ok((400, "{}".to_string())))];
+        let out = finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
+        assert_eq!(out["ok"], false);
+        assert_eq!(flow["verifiedAt"], "before");
+    }
+
+    #[test]
+    fn page_fetch_leaves_browser_headers_to_the_browser() {
+        let script = page_fetch_script(&prepared("s1r1"));
+        assert!(script.contains("country"));
+        assert!(!script.contains("User-Agent"));
+        assert!(!script.contains("sec-ch-ua"));
+    }
+
+    #[test]
+    fn replay_swaps_params_into_commands_and_refuses_missing_ones() {
+        let flow = json!({
+            "params": [{ "name": "q", "example": "film one" }],
+            "steps": [
+                { "command": { "action": "navigate", "url": "https://site.example/search?q=film%20one" } },
+                { "command": { "action": "fill", "selector": "#q", "value": "film one" } },
+            ],
+        });
+        let cmds = replay_commands(&flow, &[("q".to_string(), "other".to_string())]).unwrap();
+        assert_eq!(cmds[0]["url"], "https://site.example/search?q=other");
+        assert_eq!(cmds[1]["value"], "other");
+        let hidden = json!({
+            "params": [{ "name": "theater", "example": "401" }],
+            "steps": [{ "command": { "action": "navigate", "url": "https://site.example/downtown" } }],
+        });
+        assert!(
+            replay_commands(&hidden, &[("theater".to_string(), "402".to_string())])
+                .unwrap_err()
+                .contains("theater")
+        );
+        assert!(replay_commands(&hidden, &[]).is_ok());
     }
 }

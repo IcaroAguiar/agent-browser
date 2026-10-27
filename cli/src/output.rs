@@ -313,20 +313,45 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
                 .as_array()?
                 .iter()
                 .map(|s| {
-                    format!(
+                    let fell_back: Vec<String> = s["fellBack"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|f| {
+                            format!(
+                                "{}: {}",
+                                f["tier"].as_str().unwrap_or("-"),
+                                f["error"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect();
+                    let mut line = format!(
                         "{} via {} in {}ms",
                         s["id"].as_str().unwrap_or(""),
                         s["tier"].as_str().unwrap_or("-"),
                         s["ms"]
-                    )
+                    );
+                    if !fell_back.is_empty() {
+                        line.push_str(&format!(" after {}", fell_back.join("; ")));
+                    }
+                    line
                 })
                 .collect();
             let body = data.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            let status = match data.get("drift") {
+                Some(d) => format!(
+                    "unverified: {} on the {} tier",
+                    d["reason"].as_str().unwrap_or("response changed"),
+                    d["tier"].as_str().unwrap_or("-")
+                ),
+                None => "verified".to_string(),
+            };
             Some(format!(
-                "Flow '{}' ran in {}ms ({}), verified\n{}",
+                "Flow '{}' ran in {}ms ({}), {}\n{}",
                 data.get("name")?.as_str()?,
                 data.get("ms")?,
                 tiers.join(", "),
+                status,
                 serde_json::to_string_pretty(&body).unwrap_or_default()
             ))
         }
