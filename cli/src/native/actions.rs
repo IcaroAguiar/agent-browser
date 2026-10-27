@@ -165,6 +165,8 @@ pub struct RouteResponse {
     pub body: Option<String>,
     pub content_type: Option<String>,
     pub headers: Option<HashMap<String, String>>,
+    /// Origin a page must have to read the mock cross-origin (`--allow-origin`).
+    pub allow_origin: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -12148,14 +12150,11 @@ fn collapse_wildcards(pattern: &str) -> String {
     out
 }
 
-/// Status, headers and base64 body for a mocked route response. A mock for a
-/// cross-origin request on the same site (a page on `www.` calling `api.`)
-/// must pass the page's CORS check, or the page sees a network error instead
-/// of the mocked body. Other sites get no CORS headers, so a page from an
-/// unrelated origin cannot read the mock; a route can still set its own.
+/// Status, headers and base64 body for a mocked route response. A mock gets
+/// CORS headers only for the origin the route allows (`--allow-origin`), so a
+/// page from any other origin cannot read it.
 fn mocked_response(
     resp: &RouteResponse,
-    url: &str,
     request_headers: Option<&serde_json::Map<String, Value>>,
 ) -> (u16, Vec<Value>, String) {
     let status = resp.status.unwrap_or(200);
@@ -12203,7 +12202,11 @@ fn mocked_response(
                 .and_then(|r| url::Url::parse(&r).ok())
                 .map(|u| u.origin().ascii_serialization())
         })
-        .filter(|o| same_site(o, url));
+        .filter(|o| {
+            resp.allow_origin
+                .as_deref()
+                .is_some_and(|allowed| allowed.trim_end_matches('/') == o)
+        });
     let preflight = header("access-control-request-method");
     if let (false, Some(origin)) = (has_acao, &origin) {
         let mut add = |name: &str, value: &str| {
@@ -12226,27 +12229,6 @@ fn mocked_response(
         (status, encoded)
     };
     (status, headers, encoded)
-}
-
-/// Whether two URLs share a registrable domain under the public suffix list:
-/// `www.example.com` and `api.example.com`, or `localhost` on two ports. Hosts
-/// on a shared public suffix such as `github.io` are different sites, and IP
-/// addresses only match themselves.
-fn same_site(a: &str, b: &str) -> bool {
-    let host = |u: &str| {
-        url::Url::parse(u).ok().and_then(|u| {
-            u.host_str()
-                .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
-        })
-    };
-    let (Some(a), Some(b)) = (host(a), host(b)) else {
-        return false;
-    };
-    if a == b {
-        return true;
-    }
-    let site = |h: &str| psl::domain_str(h).map(String::from);
-    matches!((site(&a), site(&b)), (Some(x), Some(y)) if x == y)
 }
 
 fn route_url_matches(pattern: &str, url: &str) -> bool {
@@ -12410,7 +12392,7 @@ async fn resolve_fetch_paused(
 
             if let Some(ref resp) = route.response {
                 let (status, headers, encoded) =
-                    mocked_response(resp, &paused.url, paused.request_headers.as_ref());
+                    mocked_response(resp, paused.request_headers.as_ref());
                 let _ = client
                     .send_command(
                         "Fetch.fulfillRequest",
@@ -12516,6 +12498,10 @@ fn parse_route_response(cmd: &Value) -> Option<RouteResponse> {
                     .get("contentType")
                     .and_then(|s| s.as_str())
                     .map(String::from),
+                allow_origin: v
+                    .get("allowOrigin")
+                    .and_then(|s| s.as_str())
+                    .map(String::from),
                 headers: v.get("headers").and_then(|h| {
                     h.as_object().map(|m| {
                         m.iter()
@@ -12533,6 +12519,10 @@ fn parse_route_response(cmd: &Value) -> Option<RouteResponse> {
                     body: Some(body.to_string()),
                     content_type: None,
                     headers: None,
+                    allow_origin: cmd
+                        .get("allowOrigin")
+                        .and_then(|s| s.as_str())
+                        .map(String::from),
                 })
         })
 }
@@ -19031,10 +19021,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             body: Some(r#"{"mock":true}"#.to_string()),
             content_type: None,
             headers: None,
+            allow_origin: Some("https://www.example.com".to_string()),
         };
         let request = json!({ "Origin": "https://www.example.com" });
-        let (status, headers, body) =
-            mocked_response(&resp, "https://api.example.com/items", request.as_object());
+        let (status, headers, body) = mocked_response(&resp, request.as_object());
         assert_eq!(status, 200);
         assert!(!body.is_empty());
         assert_eq!(
@@ -19051,11 +19041,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             "Access-Control-Request-Method": "POST",
             "Access-Control-Request-Headers": "content-type,x-client",
         });
-        let (status, headers, body) = mocked_response(
-            &resp,
-            "https://api.example.com/items",
-            preflight.as_object(),
-        );
+        let (status, headers, body) = mocked_response(&resp, preflight.as_object());
         assert_eq!(status, 204);
         assert!(body.is_empty());
         assert_eq!(
@@ -19073,27 +19059,35 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[test]
-    fn test_mocked_response_gives_other_sites_no_cors() {
+    fn test_mocked_response_gives_other_origins_no_cors() {
         let resp = RouteResponse {
             status: None,
             body: Some(r#"{"private":true}"#.to_string()),
             content_type: None,
             headers: None,
+            allow_origin: Some("https://www.example.com".to_string()),
         };
         let request = json!({ "Origin": "https://attacker.test" });
-        let (_, headers, _) =
-            mocked_response(&resp, "https://api.example.com/items", request.as_object());
+        let (_, headers, _) = mocked_response(&resp, request.as_object());
         assert!(header_value(&headers, "Access-Control-Allow-Origin").is_none());
         let preflight = json!({
             "Origin": "https://attacker.test",
             "Access-Control-Request-Method": "GET",
         });
-        let (status, _, _) = mocked_response(
-            &resp,
-            "https://api.example.com/items",
-            preflight.as_object(),
-        );
+        let (status, _, _) = mocked_response(&resp, preflight.as_object());
         assert_eq!(status, 200);
+
+        let closed = RouteResponse {
+            allow_origin: None,
+            ..resp
+        };
+        let request = json!({ "Origin": "https://www.example.com" });
+        let (_, headers, _) = mocked_response(&closed, request.as_object());
+        assert!(header_value(&headers, "Access-Control-Allow-Origin").is_none());
+        assert_eq!(
+            header_value(&headers, "Content-Type"),
+            Some("application/json")
+        );
     }
 
     #[test]
@@ -19112,10 +19106,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             body: Some(r#"{"a":1}"#.to_string()),
             content_type: None,
             headers: Some(own),
+            allow_origin: Some("https://www.example.com".to_string()),
         };
         let request = json!({ "Origin": "https://www.example.com" });
-        let (_, headers, _) =
-            mocked_response(&resp, "https://api.example.com/items", request.as_object());
+        let (_, headers, _) = mocked_response(&resp, request.as_object());
         let count = |name: &str| {
             headers
                 .iter()
@@ -19132,36 +19126,6 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
     }
 
     #[test]
-    fn test_same_site() {
-        assert!(same_site(
-            "https://www.example.com",
-            "https://api.example.com/x"
-        ));
-        assert!(same_site(
-            "http://localhost:8770",
-            "http://localhost:8771/api"
-        ));
-        assert!(same_site(
-            "https://www.example.com.ar",
-            "https://bff.example.com.ar/x"
-        ));
-        assert!(!same_site(
-            "https://attacker.test",
-            "https://api.example.com/x"
-        ));
-        assert!(!same_site("https://a.com.ar", "https://b.com.ar"));
-        assert!(!same_site("http://127.0.0.1:8770", "http://localhost:8771"));
-        assert!(!same_site(
-            "https://attacker.github.io",
-            "https://victim.github.io/x"
-        ));
-        assert!(same_site(
-            "https://victim.github.io",
-            "https://victim.github.io/x"
-        ));
-    }
-
-    #[test]
     fn test_mocked_response_keeps_explicit_cors_and_content_type() {
         let mut own = HashMap::new();
         own.insert("Access-Control-Allow-Origin".to_string(), "*".to_string());
@@ -19170,10 +19134,10 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             body: Some("plain".to_string()),
             content_type: Some("text/plain".to_string()),
             headers: Some(own),
+            allow_origin: None,
         };
         let request = json!({ "Origin": "https://www.example.com" });
-        let (status, headers, _) =
-            mocked_response(&resp, "https://api.example.com/items", request.as_object());
+        let (status, headers, _) = mocked_response(&resp, request.as_object());
         assert_eq!(status, 201);
         assert_eq!(header_value(&headers, "Content-Type"), Some("text/plain"));
         assert_eq!(
@@ -19183,7 +19147,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
                 .count(),
             1
         );
-        let (_, headers, _) = mocked_response(&resp, "https://api.example.com/items", None);
+        let (_, headers, _) = mocked_response(&resp, None);
         assert!(header_value(&headers, "Access-Control-Allow-Credentials").is_none());
     }
 
@@ -19196,6 +19160,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(response.body.as_deref(), Some("{\"users\":[]}"));
         assert_eq!(response.content_type, None);
         assert_eq!(response.headers, None);
+        assert_eq!(response.allow_origin, None);
     }
 
     #[tokio::test]
