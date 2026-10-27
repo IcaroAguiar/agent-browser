@@ -3,6 +3,27 @@ title: "Changelog"
 navTitle: "Changelog"
 ---
 
+## v0.40.0
+
+<p className="text-[#888] text-sm">October 27, 2026</p>
+
+### Breaking Changes
+
+- **`@agent-browser/eve` now requires eve 0.84.0 or later.** eve 0.84.0 rejects extensions built by earlier releases, so the extension is now built with it. Apps on older eve should stay on `@agent-browser/eve@0.39` (#2226)
+
+### New Features
+
+- Added **one MCP server per Vercel Sandbox** with `startAgentBrowserMcp` in `@agent-browser/sandbox/vercel`, which keeps a single `agent-browser mcp` running over Sandbox stdin, and `connectAgentBrowserMcp` for any runtime that exposes stdin and stdout streams (#2228)
+- Added **`--omit-command`** to `batch` and `omitCommand` to the MCP batch tool, replacing repeated raw command arrays in JSON output with zero-based indexes (#2216)
+
+### Bug Fixes
+
+- Fixed **`state load` and launch-time storage restores** exposing saved tokens to page scripts and writing one origin's storage into another after a redirect; storage is now written through DevTools only while the page is on the saved origin, and skipped origins are reported (#2212)
+- Fixed **`<session>.config` files** piling up in the socket directory after daemons exit (#2128)
+- Fixed **Windows sessions** where a dead daemon could keep holding a pinned tab, and where two sessions with the same name in different socket directories could connect to each other's daemon (#2223)
+
+---
+
 ## v0.39.4
 
 <p className="text-[#888] text-sm">October 26, 2026</p>
