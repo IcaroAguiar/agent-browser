@@ -667,6 +667,10 @@ pub struct DaemonState {
     pub pending_confirmation: Option<PendingConfirmation>,
     pub har_recording: bool,
     pub har_entries: Vec<HarEntry>,
+    /// Commands and request tags captured by `flow start`.
+    pub flow: super::flow::FlowRecorder,
+    /// Registrable domain whose saved flows were last announced.
+    pub flow_hinted: Option<String>,
     pub har_content_mode: HarContentMode,
     /// Bytes of response bodies embedded so far this recording; enforces
     /// [`HAR_MAX_TOTAL_BODY_BYTES`].
@@ -841,6 +845,8 @@ impl DaemonState {
             pending_confirmation: None,
             har_recording: false,
             har_entries: Vec::new(),
+            flow: Default::default(),
+            flow_hinted: None,
             har_content_mode: HarContentMode::default(),
             har_body_total_bytes: 0,
             confirm_actions: ConfirmActions::from_env(),
@@ -2108,6 +2114,7 @@ impl DaemonState {
                                         response_body: None,
                                         response_body_base64: false,
                                     });
+                                    self.flow.tag_request(&request_id);
                                 }
                                 if self.request_tracking {
                                     let headers =
@@ -2743,6 +2750,9 @@ fn skip_launch_action(action: &str) -> bool {
             | "close"
             | "read"
             | "har_stop"
+            | "flow_save"
+            | "flow_run"
+            | "flow_list"
             | "credentials_set"
             | "credentials_get"
             | "credentials_delete"
@@ -2922,6 +2932,9 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
     if let Err(e) = state.drain_cdp_events_background().await {
         return error_response(&id, &super::browser::to_ai_friendly_error(&e));
     }
+
+    // After the drain, so late requests from the previous command keep its tag.
+    state.flow.begin_command(action, cmd);
 
     // Keep element resolution in sync with the `frame` selection (see
     // element::set_active_frame for why this is mirrored).
@@ -3327,6 +3340,10 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "diff_screenshot" => handle_diff_screenshot(cmd, state).await,
         "video_start" => handle_video_start(cmd, state).await,
         "video_stop" => handle_video_stop(state).await,
+        "flow_start" => handle_flow_start(cmd, state).await,
+        "flow_save" => handle_flow_save(cmd, state).await,
+        "flow_run" => handle_flow_run(cmd, state).await,
+        "flow_list" => handle_flow_list(cmd),
         "har_start" => handle_har_start(cmd, state).await,
         "har_stop" => handle_har_stop(cmd, state).await,
         "route" => handle_route(cmd, state).await,
@@ -3465,6 +3482,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         );
     }
     attach_webmcp_availability(&mut resp, action, state).await;
+    attach_flow_availability(&mut resp, action, state).await;
 
     // Auto-report pending JavaScript dialog so agents know why commands may hang
     if action != "dialog" {
@@ -11775,6 +11793,210 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
 
     Ok(json!({ "path": path, "requestCount": request_count }))
+}
+
+// ---------------------------------------------------------------------------
+// Saved flows
+// ---------------------------------------------------------------------------
+
+async fn handle_flow_start(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let name = cmd
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("flow start requires a name")?;
+    super::flow::validate_name(name)?;
+    if let Some(active) = state.flow.name.as_deref() {
+        return Err(format!(
+            "flow '{}' is already recording; run `flow save` first",
+            active
+        ));
+    }
+    let started_har = !state.har_recording;
+    if started_har {
+        handle_har_start(&json!({}), state).await?;
+    }
+    state.flow.start(name, started_har);
+    Ok(json!({ "name": name, "recording": true }))
+}
+
+async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let name = state
+        .flow
+        .name
+        .clone()
+        .ok_or("no flow is recording; run `flow start <name>` first")?;
+    let params = super::flow::parse_params(cmd)?;
+    let built = super::flow::build_flow(super::flow::SaveInput {
+        name: &name,
+        recorder: &state.flow,
+        entries: &state.har_entries,
+        params: &params,
+        output: cmd.get("output").and_then(|v| v.as_str()),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    });
+    if state.flow.started_har {
+        state.har_recording = false;
+        state.har_entries.clear();
+        state.har_body_total_bytes = 0;
+    }
+    state.flow = Default::default();
+    let (flow, mut report) = built?;
+    let path = super::flow::write_flow(&flow)?;
+    report["path"] = json!(path.to_string_lossy());
+    Ok(report)
+}
+
+async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
+    let started = std::time::Instant::now();
+    let name = cmd
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("flow run requires a name")?;
+    let origin = cmd.get("origin").and_then(|v| v.as_str());
+    let mut flow = super::flow::load_flow(name, origin)?;
+    let params = super::flow::parse_params(cmd)?;
+    let requests = super::flow::prepare(&flow, &params)?;
+    let allow_write = cmd
+        .get("allowWrite")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !allow_write {
+        if let Some(w) = requests.iter().find(|r| super::flow::is_write(&r.method)) {
+            return Err(format!(
+                "flow '{}' sends {} {} (step {}); rerun with --allow-write to send it",
+                name, w.method, w.url, w.step
+            ));
+        }
+    }
+
+    let client = super::flow::http_client()?;
+    let mut results = Vec::new();
+    for req in &requests {
+        let cookie = match state.browser.as_ref() {
+            Some(mgr) => match mgr.active_session_id() {
+                Ok(sid) => cookies::get_cookies(&mgr.client, sid, Some(vec![req.url.clone()]))
+                    .await
+                    .ok()
+                    .map(|c| super::flow::cookie_header(&c)),
+                Err(_) => None,
+            },
+            None => None,
+        };
+        let result = super::flow::run_http(&client, req, cookie.as_deref()).await;
+        let failed = !result.ok;
+        results.push(result);
+        if failed {
+            break;
+        }
+    }
+
+    let shape = super::flow::Shape::from_cmd(cmd);
+    if let Some(body) = results
+        .iter()
+        .find(|r| r.ok && r.id == flow["output"].as_str().unwrap_or(""))
+        .and_then(|r| r.body.as_ref())
+    {
+        let unknown = super::flow::unknown_fields(body, &shape);
+        if !unknown.is_empty() {
+            return Err(format!(
+                "no item has field(s) {}. Fields: {}",
+                unknown.join(", "),
+                flow["itemFields"]
+                    .as_array()
+                    .map(|f| f
+                        .iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let response = super::flow::finish_run(
+        &mut flow,
+        &results,
+        &now,
+        started.elapsed().as_millis(),
+        &shape,
+    );
+    super::flow::write_flow(&flow)?;
+    if response["ok"] != json!(true) {
+        let failure = results.iter().find(|r| !r.ok);
+        let reason = failure.and_then(|r| r.reason.clone()).unwrap_or_default();
+        let step = failure.map(|r| r.step).unwrap_or(0);
+        if failure.is_some_and(|r| r.drift) {
+            return Err(format!(
+                "flow '{}' failed over HTTP at step {}: {}. The flow is now marked unverified; drive the browser for this task instead",
+                name, step, reason
+            ));
+        }
+        let examples = flow["params"]
+            .as_array()
+            .map(|ps| {
+                ps.iter()
+                    .map(|p| {
+                        format!(
+                            "{}={}",
+                            p["name"].as_str().unwrap_or(""),
+                            p["example"].as_str().unwrap_or("")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        return Err(format!(
+            "flow '{}' failed at step {}: {}. The site likely rejected the param values; the recorded run used {}",
+            name, step, reason, examples
+        ));
+    }
+    Ok(response)
+}
+
+/// After a navigation, tell the agent which saved flows exist for the page's
+/// site, once per site, so it can call them instead of driving the page.
+async fn attach_flow_availability(resp: &mut Value, action: &str, state: &mut DaemonState) {
+    if !matches!(
+        action,
+        "navigate" | "back" | "forward" | "reload" | "tab_switch"
+    ) || state.flow.active()
+        || resp.get("success") != Some(&json!(true))
+    {
+        return;
+    }
+    let url = match state.browser.as_ref() {
+        Some(mgr) => mgr.get_url().await.ok(),
+        None => None,
+    };
+    let Some(host) = url
+        .as_deref()
+        .and_then(|u| url::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(String::from))
+    else {
+        return;
+    };
+    let site = super::flow::base_domain(&host);
+    if state.flow_hinted.as_deref() == Some(site.as_str()) {
+        return;
+    }
+    state.flow_hinted = Some(site);
+    let flows = super::flow::list_flows(Some(&host));
+    if flows.is_empty() {
+        return;
+    }
+    if let Some(data) = resp
+        .as_object_mut()
+        .map(|r| r.entry("data").or_insert_with(|| json!({})))
+        .and_then(|d| d.as_object_mut())
+    {
+        data.insert("flows".to_string(), json!(flows));
+    }
+}
+
+fn handle_flow_list(cmd: &Value) -> Result<Value, String> {
+    let origin = cmd.get("origin").and_then(|v| v.as_str());
+    Ok(json!({ "flows": super::flow::list_flows(origin) }))
 }
 
 // ---------------------------------------------------------------------------
