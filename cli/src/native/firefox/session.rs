@@ -24,6 +24,7 @@ const SUBSCRIBED_EVENTS: [&str; 2] = [
 /** One launched Firefox. Dropping it kills the process tree and deletes the profile. */
 pub struct FirefoxSession {
     process: Option<FirefoxProcess>,
+    pub headless: bool,
     pub bidi: BidiClient,
     pub rdp: RdpClient,
     pub accessibility_actor: String,
@@ -144,6 +145,7 @@ impl FirefoxSession {
             .to_string();
         Ok(Self {
             process: Some(process),
+            headless: options.headless,
             bidi,
             rdp,
             accessibility_actor,
@@ -167,11 +169,12 @@ impl FirefoxSession {
         id
     }
 
-    /// True once the Firefox process has exited.
+    /// True once the Firefox process has exited or its BiDi connection has closed.
     pub fn has_exited(&mut self) -> bool {
         self.process
             .as_mut()
             .is_some_and(FirefoxProcess::has_exited)
+            || self.bidi.reader.is_finished()
     }
 
     /// Ends the BiDi session, then kills Firefox and deletes its profile.
@@ -336,6 +339,7 @@ pub(crate) mod tests {
         let rdp = RdpClient::from_stream(a).await.unwrap();
         let session = FirefoxSession {
             process: None,
+            headless: true,
             bidi,
             rdp,
             accessibility_actor: "acc".into(),

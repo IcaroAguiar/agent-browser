@@ -24,7 +24,7 @@ pub struct BidiClient {
     pending: Pending,
     events: broadcast::Sender<Value>,
     next_id: AtomicU64,
-    reader: tokio::task::JoinHandle<()>,
+    pub(crate) reader: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for BidiClient {

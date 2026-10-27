@@ -906,7 +906,8 @@ impl DaemonState {
             self.active_provider_connection,
             self.browser
                 .as_ref()
-                .is_some_and(BrowserManager::blocks_default_idle_shutdown),
+                .is_some_and(BrowserManager::blocks_default_idle_shutdown)
+                || self.firefox.as_ref().is_some_and(|ff| !ff.headless),
         )
     }
 
@@ -5316,10 +5317,8 @@ async fn launch_firefox(
         None,
     );
     let storage_state = options.storage_state.clone();
-    let hash_matches = state.launch_hash == Some(hash);
     let reuse_session = state.firefox.as_mut().is_some_and(|ff| !ff.has_exited());
-    if reuse_session && hash_matches {
-        load_storage_state(state, &storage_state).await?;
+    if reuse_session && state.launch_hash == Some(hash) && storage_state.is_none() {
         return Ok(json!({ "launched": true, "reused": true, "relaunchedBrowser": false }));
     }
     let had_browser = has_active_browser_session(state);
@@ -7713,13 +7712,13 @@ async fn handle_session_info(state: &DaemonState) -> Result<Value, String> {
         "namespace": env::var("AGENT_BROWSER_NAMESPACE").ok(),
         "socketDir": get_socket_dir().to_string_lossy(),
         "backgroundPid": std::process::id(),
-        "browserLaunched": state.browser.is_some(),
+        "browserLaunched": has_active_browser_session(state),
         "pageCount": state.browser.as_ref().map(|mgr| mgr.page_count()).unwrap_or(0),
         "engine": state.engine,
         "launchHash": state.launch_hash,
         "compatibilityStatus": "current",
         "effectiveLaunch": {
-            "browserLaunched": state.browser.is_some(),
+            "browserLaunched": has_active_browser_session(state),
             "engine": state.engine,
             "launchHash": state.launch_hash,
         },
@@ -12412,7 +12411,7 @@ fn mocked_response(
     (status, headers, encoded)
 }
 
-fn route_url_matches(pattern: &str, url: &str) -> bool {
+pub(crate) fn route_url_matches(pattern: &str, url: &str) -> bool {
     if pattern == "*" {
         return true;
     }
@@ -14359,7 +14358,7 @@ fn inject_lifecycle(
             "restoreStatus": state.restore_status,
             "saveStatus": state.restore_save_status,
             "effectiveLaunch": {
-                "browserLaunched": state.browser.is_some(),
+                "browserLaunched": has_active_browser_session(state),
                 "engine": state.engine,
                 "launchHash": state.launch_hash,
             }
@@ -19765,7 +19764,8 @@ mod firefox_routing_tests {
     async fn explicit_launch_reuses_a_live_session_with_the_same_options() {
         let _guard = clean_env();
         let (mut state, _calls) = firefox_state().await;
-        let options = launch_options_from_env();
+        let mut options = launch_options_from_env();
+        options.executable_path = Some("/nonexistent/firefox".to_string());
         let hash = launch_hash(
             &options,
             &[],
@@ -19777,10 +19777,15 @@ mod firefox_routing_tests {
             None,
         );
         state.launch_hash = Some(hash);
-        let r = launch_firefox(&mut state, options, None, false, None, false)
+        let r = launch_firefox(&mut state, options.clone(), None, false, None, false)
             .await
             .unwrap();
         assert_eq!(r["reused"], true);
+        options.storage_state = Some("{}".into());
+        let error = launch_firefox(&mut state, options, None, false, None, false)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Firefox executable not found"), "{error}");
     }
 
     #[tokio::test]

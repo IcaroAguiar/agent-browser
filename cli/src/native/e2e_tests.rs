@@ -14487,7 +14487,13 @@ fn firefox_test_environment(tmp: &std::path::Path) -> EnvGuard<'static> {
         "all_proxy",
         "no_proxy",
     ];
-    let env = EnvGuard::new(&[&KEYS[..], &["TMPDIR"]].concat());
+    let env = EnvGuard::new(
+        &[
+            &KEYS[..],
+            &["TMPDIR", "HOME", "AGENT_BROWSER_ENCRYPTION_KEY"],
+        ]
+        .concat(),
+    );
     for key in KEYS {
         env.remove(key);
     }
@@ -14580,8 +14586,11 @@ async fn firefox_close(state: &mut DaemonState) {
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_smoke() {
     required_firefox_binary();
+    let home = tempfile::tempdir().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let _env = firefox_test_environment(tmp.path());
+    _env.set("HOME", home.path().to_str().unwrap());
+    _env.remove("AGENT_BROWSER_ENCRYPTION_KEY");
     let fixture = firefox_fixture().await;
     let mut state = DaemonState::new();
     launch_firefox(&mut state, json!({})).await;
@@ -14623,6 +14632,39 @@ async fn e2e_firefox_smoke() {
             .is_some_and(|e| e.contains("--init-script")),
         "{resp}"
     );
+    firefox_open(&mut state, &fixture.url).await;
+    firefox_eval(&mut state, "localStorage.setItem('visited', 'from-a')").await;
+    super::firefox::storage::save_auto_state(
+        state.firefox.as_ref().unwrap(),
+        "firefox-smoke",
+        "autosave",
+    )
+    .await
+    .unwrap();
+    firefox_open(&mut state, &fixture.other).await;
+    let saved_path = super::firefox::storage::save_auto_state(
+        state.firefox.as_ref().unwrap(),
+        "firefox-smoke",
+        "autosave",
+    )
+    .await
+    .unwrap();
+    let state_data: Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
+    assert!(state_data["origins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|origin| origin["localStorage"] == json!([{"name": "visited", "value": "from-a"}])));
+    let saved = firefox_command(
+        &mut state,
+        json!({ "id": "save-b", "action": "state_save", "path": saved_path }),
+    )
+    .await;
+    assert_success(&saved);
+    let state_data: Value =
+        serde_json::from_str(&std::fs::read_to_string(&saved_path).unwrap()).unwrap();
+    assert_eq!(state_data["origins"], json!([]));
     firefox_close(&mut state).await;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     assert!(
@@ -14906,7 +14948,7 @@ async fn e2e_firefox_auto_dialog() {
     firefox_close(&mut state).await;
 }
 
-/// A cookie set without a path uses the RFC 6265 default-path; an explicit path stays scoped.
+/// A cookie set without a path is stored at `/`, so it stays visible site-wide; an explicit path stays scoped.
 #[tokio::test]
 #[ignore = "requires FIREFOX_BIN; run serially"]
 async fn e2e_firefox_cookie_default_path() {
@@ -15047,7 +15089,8 @@ async fn e2e_firefox_restore_validation_failure_does_not_overwrite_state() {
     )
     .await;
     assert_success(&resp);
-    firefox_close(&mut state).await;
+    let resp = firefox_command(&mut state, json!({ "id": "close", "action": "close" })).await;
+    assert_eq!(get_data(&resp)["saveStatus"], "saved");
 
     let path = super::state::find_auto_state_file(&restore_key)
         .expect("first close should create Firefox restore state");
@@ -15065,9 +15108,12 @@ async fn e2e_firefox_restore_validation_failure_does_not_overwrite_state() {
     firefox_open(&mut state, &fixture.url).await;
     assert_eq!(state.restore_status, "loaded_but_invalid");
     firefox_eval(&mut state, "localStorage.setItem('uncommitted', '1')").await;
-    firefox_close(&mut state).await;
+    let resp = firefox_command(&mut state, json!({ "id": "close", "action": "close" })).await;
+    assert_eq!(get_data(&resp)["saveStatus"], "skipped_restore_failed");
 
     assert_eq!(std::fs::read(&path).unwrap(), before);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}.previous"));
 }
 
 #[tokio::test]

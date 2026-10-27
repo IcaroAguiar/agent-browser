@@ -347,23 +347,32 @@ pub async fn storage_clear(cmd: &Value, state: &mut DaemonState) -> Result<Value
     Ok(json!({ "cleared": true }))
 }
 
-async fn collect_origins(ff: &FirefoxSession) -> Result<Vec<OriginStorage>, String> {
-    let tree = ff
-        .bidi
-        .send("browsingContext.getTree", json!({"maxDepth": 0}))
-        .await?;
+fn collect_context_ids(contexts: &[Value], ids: &mut Vec<String>) {
+    for context in contexts {
+        if let Some(id) = context["context"].as_str() {
+            ids.push(id.to_string());
+        }
+        if let Some(children) = context["children"].as_array() {
+            collect_context_ids(children, ids);
+        }
+    }
+}
+
+async fn collect_origins(
+    ff: &FirefoxSession,
+) -> Result<(Vec<OriginStorage>, HashSet<String>), String> {
+    let tree = ff.bidi.send("browsingContext.getTree", json!({})).await?;
     let contexts = tree["contexts"]
         .as_array()
         .ok_or("Failed to read active browsing contexts")?;
+    let mut context_ids = Vec::new();
+    collect_context_ids(contexts, &mut context_ids);
     let mut seen = HashSet::new();
     let mut origins = Vec::new();
-    for context in contexts {
-        let Some(id) = context["context"].as_str() else {
-            continue;
-        };
+    for id in context_ids {
         let Ok(data) = ff
             .bidi
-            .call_function(id, ORIGIN_STORAGE_JS, None, Vec::new())
+            .call_function(&id, ORIGIN_STORAGE_JS, None, Vec::new())
             .await
         else {
             continue;
@@ -371,22 +380,38 @@ async fn collect_origins(ff: &FirefoxSession) -> Result<Vec<OriginStorage>, Stri
         let Ok(origin) = serde_json::from_value::<OriginStorage>(data) else {
             continue;
         };
-        let has_entries = !origin.local_storage.is_empty() || !origin.session_storage.is_empty();
-        if has_entries && origin.origin != "null" && seen.insert(origin.origin.clone()) {
+        if origin.origin == "null" || !seen.insert(origin.origin.clone()) {
+            continue;
+        }
+        if !origin.local_storage.is_empty() || !origin.session_storage.is_empty() {
             origins.push(origin);
         }
     }
-    Ok(origins)
+
+    Ok((origins, seen))
 }
 
-async fn collect_state(ff: &FirefoxSession) -> Result<StorageState, String> {
+async fn write_state_to(
+    ff: &FirefoxSession,
+    path: &str,
+    previous_path: Option<&str>,
+) -> Result<String, String> {
     let cookies = get_all_cookies(ff).await?;
-    let origins = collect_origins(ff).await?;
-    Ok(StorageState { cookies, origins })
-}
-
-async fn write_state_to(ff: &FirefoxSession, path: &str) -> Result<String, String> {
-    let state = collect_state(ff).await?;
+    let (origins, mut seen) = collect_origins(ff).await?;
+    let mut state = StorageState { cookies, origins };
+    if let Some(previous_path) = previous_path.filter(|path| {
+        std::path::Path::new(path).exists() || std::path::Path::new(&format!("{path}.enc")).exists()
+    }) {
+        let json = state::read_state_json(previous_path)?;
+        let previous: StorageState =
+            serde_json::from_str(&json).map_err(|e| format!("Invalid state file: {e}"))?;
+        state.origins.extend(
+            previous
+                .origins
+                .into_iter()
+                .filter(|origin| seen.insert(origin.origin.clone())),
+        );
+    }
     let json = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize state: {e}"))?;
     state::write_state_json(path, &json)
@@ -401,7 +426,7 @@ pub async fn validate_restore(
 ) -> Result<(), String> {
     if let Some(pattern) = url_pattern {
         let url = ff.url().await?;
-        if !super::page::url_matches(pattern, &url) {
+        if !crate::native::actions::route_url_matches(pattern, &url) {
             return Err(format!(
                 "restore URL validation failed: '{}' did not match '{}'",
                 url, pattern
@@ -441,11 +466,12 @@ pub async fn state_save(cmd: &Value, state: &mut DaemonState) -> Result<Value, S
                 .to_string()
         }
     };
-    let saved_path = write_state_to(ff, &path).await?;
+    let saved_path = write_state_to(ff, &path, None).await?;
     Ok(json!({ "saved": true, "path": saved_path }))
 }
 
 /// Saves the `--session-name` state file used by restore-on-close/autosave.
+/// shortcut: Preserves only previously saved unavailable origins; track visited origins when first-save recovery is needed.
 pub async fn save_auto_state(
     ff: &FirefoxSession,
     session_name: &str,
@@ -453,8 +479,9 @@ pub async fn save_auto_state(
 ) -> Result<String, String> {
     let (candidate_path, final_path) = state::auto_state_paths(session_name, session_id)?;
     let candidate_path = candidate_path.to_string_lossy().to_string();
-    let candidate_path = write_state_to(ff, &candidate_path).await?;
-    state::promote_auto_state_candidate(&candidate_path, &final_path)
+    let final_path = final_path.to_string_lossy().to_string();
+    let candidate_path = write_state_to(ff, &candidate_path, Some(&final_path)).await?;
+    state::promote_auto_state_candidate(&candidate_path, std::path::Path::new(&final_path))
 }
 
 /// Run in a BiDi sandbox so page scripts never see the payload. The origin is checked in the same call so a redirect cannot race it, and the call returns false when the page landed elsewhere.

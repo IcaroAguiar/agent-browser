@@ -257,7 +257,8 @@ impl FirefoxProcess {
         let reader = stderr.map(|s| {
             let tail = tail.clone();
             std::thread::spawn(move || {
-                for line in BufReader::new(s).lines().map_while(Result::ok) {
+                for line in BufReader::new(s).split(b'\n').map_while(Result::ok) {
+                    let line = String::from_utf8_lossy(&line);
                     if let Some(url) = parse_bidi_url(&line) {
                         let _ = tx.send(url);
                     }
@@ -265,7 +266,7 @@ impl FirefoxProcess {
                     if t.len() == STDERR_TAIL_LINES {
                         t.pop_front();
                     }
-                    t.push_back(line);
+                    t.push_back(line.trim_end_matches('\r').to_string());
                 }
             })
         });

@@ -3107,7 +3107,7 @@ Usage: agent-browser state <operation> [args]
 Save, restore, list, and manage browser state (cookies, localStorage, sessionStorage).
 
 Operations:
-  save <path>                        Save current state to file
+  save <path>                        Save current state, overwriting the file
   load <path>                        Load state from file (origins that redirect
                                      elsewhere are skipped and listed)
   list                               List saved state files
@@ -3120,6 +3120,7 @@ Automatic State Persistence:
   Use --restore to auto-save/restore state across restarts:
   agent-browser --session myapp --restore open https://example.com
   Or set AGENT_BROWSER_RESTORE environment variable.
+  Firefox auto-save collects active iframe origins and preserves saved origins it cannot read.
 
 State Encryption:
   Set AGENT_BROWSER_ENCRYPTION_KEY (64-char hex) for AES-256-GCM encryption.
