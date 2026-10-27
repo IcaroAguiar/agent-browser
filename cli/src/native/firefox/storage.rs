@@ -1,13 +1,8 @@
 //! Firefox cookies, web storage and saved state. Formats must match `cookies.rs` and `state.rs`.
 
-use std::collections::HashSet;
-use std::fs;
-
-use aes_gcm::aead::Aead;
-use aes_gcm::{aead::KeyInit, Aes256Gcm};
 use base64::Engine;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 use super::actions::session;
 use super::session::FirefoxSession;
@@ -172,12 +167,53 @@ fn command_cookie_to_bidi(cookie: &Value, current_url: Option<&str>) -> Result<V
     Ok(out)
 }
 
-fn domain_matches(cookie: &Cookie, url: &url::Url) -> bool {
+fn cookie_applies_to_url(cookie: &Cookie, url: &url::Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
-    let domain = cookie.domain.trim_start_matches('.');
-    host == domain || host.ends_with(&format!(".{domain}"))
+    let domain = cookie.domain.to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    let domain_matches = host.as_str() == domain.strip_prefix('.').unwrap_or(&domain)
+        || (domain.starts_with('.') && host.ends_with(&domain));
+    let path = if cookie.path.is_empty() {
+        "/"
+    } else {
+        cookie.path.as_str()
+    };
+    let url_path = url.path();
+    let path_matches = url_path == path
+        || url_path
+            .strip_prefix(path)
+            .is_some_and(|suffix| path.ends_with('/') || suffix.starts_with('/'));
+    let secure_transport = matches!(url.scheme(), "https" | "wss");
+    let supported_scheme = secure_transport || matches!(url.scheme(), "http" | "ws");
+    domain_matches && path_matches && supported_scheme && (!cookie.secure || secure_transport)
+}
+
+fn append_context_urls(contexts: &[Value], urls: &mut Vec<url::Url>) {
+    for context in contexts {
+        if let Some(value) = context["url"].as_str() {
+            if let Ok(url) = url::Url::parse(value) {
+                urls.push(url);
+            }
+        }
+        if let Some(children) = context["children"].as_array() {
+            append_context_urls(children, urls);
+        }
+    }
+}
+
+async fn cookie_urls(ff: &FirefoxSession) -> Result<Vec<url::Url>, String> {
+    let tree = ff
+        .bidi
+        .send("browsingContext.getTree", json!({"root": ff.context}))
+        .await?;
+    let contexts = tree["contexts"]
+        .as_array()
+        .ok_or("Failed to read active browsing contexts")?;
+    let mut urls = Vec::new();
+    append_context_urls(contexts, &mut urls);
+    Ok(urls)
 }
 
 async fn get_all_cookies(ff: &FirefoxSession) -> Result<Vec<Cookie>, String> {
@@ -190,20 +226,25 @@ async fn get_all_cookies(ff: &FirefoxSession) -> Result<Vec<Cookie>, String> {
         .collect())
 }
 
-/// Returns `{cookies: [...]}` like Chrome's `handle_cookies_get` (via `storage.getCookies`).
+/// Returns cookies for requested URLs or active page and frames when omitted.
 pub async fn cookies_get(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let ff = session(state)?;
-    let mut cookies = get_all_cookies(ff).await?;
-    if let Some(urls) = cmd.get("urls").and_then(Value::as_array) {
-        let urls: Vec<url::Url> = urls
+    let urls = match cmd.get("urls") {
+        Some(value) => value
+            .as_array()
+            .ok_or("Invalid 'urls' parameter: expected an array")?
             .iter()
-            .filter_map(Value::as_str)
-            .filter_map(|u| url::Url::parse(u).ok())
-            .collect();
-        if !urls.is_empty() {
-            cookies.retain(|cookie| urls.iter().any(|url| domain_matches(cookie, url)));
-        }
-    }
+            .map(|value| {
+                let value = value
+                    .as_str()
+                    .ok_or("Invalid URL in 'urls': expected a string")?;
+                url::Url::parse(value).map_err(|error| format!("Invalid URL '{value}': {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None => cookie_urls(ff).await?,
+    };
+    let mut cookies = get_all_cookies(ff).await?;
+    cookies.retain(|cookie| urls.iter().any(|url| cookie_applies_to_url(cookie, url)));
     Ok(json!({ "cookies": cookies }))
 }
 
@@ -306,17 +347,17 @@ pub async fn storage_clear(cmd: &Value, state: &mut DaemonState) -> Result<Value
     Ok(json!({ "cleared": true }))
 }
 
-async fn collect_origins(ff: &FirefoxSession) -> Vec<OriginStorage> {
-    let Ok(tree) = ff
+async fn collect_origins(ff: &FirefoxSession) -> Result<Vec<OriginStorage>, String> {
+    let tree = ff
         .bidi
         .send("browsingContext.getTree", json!({"maxDepth": 0}))
-        .await
-    else {
-        return Vec::new();
-    };
+        .await?;
+    let contexts = tree["contexts"]
+        .as_array()
+        .ok_or("Failed to read active browsing contexts")?;
     let mut seen = HashSet::new();
     let mut origins = Vec::new();
-    for context in tree["contexts"].as_array().into_iter().flatten() {
+    for context in contexts {
         let Some(id) = context["context"].as_str() else {
             continue;
         };
@@ -335,105 +376,49 @@ async fn collect_origins(ff: &FirefoxSession) -> Vec<OriginStorage> {
             origins.push(origin);
         }
     }
-    origins
+    Ok(origins)
 }
 
 async fn collect_state(ff: &FirefoxSession) -> Result<StorageState, String> {
     let cookies = get_all_cookies(ff).await?;
-    let origins = collect_origins(ff).await;
+    let origins = collect_origins(ff).await?;
     Ok(StorageState { cookies, origins })
-}
-
-fn encryption_key() -> Option<String> {
-    std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").ok()
-}
-
-fn is_encrypted(path: &str) -> bool {
-    path.ends_with(".json.enc") || path.ends_with(".json.enc.previous")
-}
-
-fn encrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
-    let mut hasher = Sha256::new();
-    hasher.update(key_str.as_bytes());
-    let key_bytes = hasher.finalize();
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| format!("Invalid key: {e}"))?;
-
-    let mut nonce = [0u8; 12];
-    getrandom::getrandom(&mut nonce).map_err(|e| format!("Failed to generate nonce: {e}"))?;
-    let ciphertext = cipher
-        .encrypt(aes_gcm::Nonce::from_slice(&nonce), data)
-        .map_err(|e| format!("Encryption failed: {e}"))?;
-
-    let mut result = Vec::with_capacity(12 + ciphertext.len());
-    result.extend_from_slice(&nonce);
-    result.extend_from_slice(&ciphertext);
-    Ok(result)
-}
-
-fn decrypt_data(data: &[u8], key_str: &str) -> Result<Vec<u8>, String> {
-    if data.len() < 13 {
-        return Err("Ciphertext too short".to_string());
-    }
-    let (nonce_bytes, ciphertext) = data.split_at(12);
-    let mut hasher = Sha256::new();
-    hasher.update(key_str.as_bytes());
-    let key_bytes = hasher.finalize();
-    let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| format!("Invalid key: {e}"))?;
-    cipher
-        .decrypt(aes_gcm::Nonce::from_slice(nonce_bytes), ciphertext)
-        .map_err(|e| format!("Decryption failed: {e}"))
-}
-
-fn read_state_json(path: &str) -> Result<String, String> {
-    if is_encrypted(path) {
-        let key = encryption_key().ok_or_else(|| {
-            "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()
-        })?;
-        let data = fs::read(path).map_err(|e| format!("Failed to read state from {path}: {e}"))?;
-        let plaintext = decrypt_data(&data, &key)?;
-        return String::from_utf8(plaintext)
-            .map_err(|e| format!("Decrypted state is not valid UTF-8: {e}"));
-    }
-    match fs::read_to_string(path) {
-        Ok(json) => Ok(json),
-        Err(err) => match encryption_key() {
-            Some(key) => {
-                let encrypted = format!("{path}.enc");
-                let data = fs::read(&encrypted)
-                    .map_err(|_| format!("Failed to read state from {path}: {err}"))?;
-                let plaintext = decrypt_data(&data, &key)?;
-                String::from_utf8(plaintext)
-                    .map_err(|e| format!("Decrypted state is not valid UTF-8: {e}"))
-            }
-            None => Err(format!("Failed to read state from {path}: {err}")),
-        },
-    }
-}
-
-fn serialize_state(state: &StorageState) -> Result<String, String> {
-    serde_json::to_string_pretty(state).map_err(|e| format!("Failed to serialize state: {e}"))
-}
-
-fn write_state_json(path: &str, json_str: &str) -> Result<String, String> {
-    match encryption_key() {
-        Some(key) => {
-            let encrypted_path = format!("{path}.enc");
-            let encrypted = encrypt_data(json_str.as_bytes(), &key)?;
-            state::write_private(&encrypted_path, &encrypted)
-                .map_err(|e| format!("Failed to write state to {encrypted_path}: {e}"))?;
-            Ok(encrypted_path)
-        }
-        None => {
-            state::write_private(path, json_str.as_bytes())
-                .map_err(|e| format!("Failed to write state to {path}: {e}"))?;
-            Ok(path.to_string())
-        }
-    }
 }
 
 async fn write_state_to(ff: &FirefoxSession, path: &str) -> Result<String, String> {
     let state = collect_state(ff).await?;
-    write_state_json(path, &serialize_state(&state)?)
+    let json = serde_json::to_string_pretty(&state)
+        .map_err(|e| format!("Failed to serialize state: {e}"))?;
+    state::write_state_json(path, &json)
+}
+
+pub async fn validate_restore(
+    ff: &FirefoxSession,
+    url_pattern: Option<&str>,
+    text: Option<&str>,
+    expression: Option<&str>,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    if let Some(pattern) = url_pattern {
+        let url = ff.url().await?;
+        if !super::page::url_matches(pattern, &url) {
+            return Err(format!(
+                "restore URL validation failed: '{}' did not match '{}'",
+                url, pattern
+            ));
+        }
+    }
+    if let Some(text) = text {
+        let check = format!(
+            "(document.body.innerText || '').includes({})",
+            serde_json::to_string(text).unwrap_or_default()
+        );
+        super::page::poll_until_true(ff, &check, timeout_ms).await?;
+    }
+    if let Some(expression) = expression {
+        super::page::poll_until_true(ff, &format!("!!({expression})"), timeout_ms).await?;
+    }
+    Ok(())
 }
 
 /// Saves cookies and origin storage in the `state.rs` JSON format, like Chrome's `handle_state_save`.
@@ -466,17 +451,10 @@ pub async fn save_auto_state(
     session_name: &str,
     session_id: &str,
 ) -> Result<String, String> {
-    if !is_valid_session_name(session_name) {
-        return Err(session_name_error(session_name));
-    }
-    let dir = state::get_sessions_dir();
-    state::create_private_dir(&dir)
-        .map_err(|e| format!("Failed to create state directory {}: {e}", dir.display()))?;
-    let path = dir
-        .join(format!("{session_name}-{session_id}.json"))
-        .to_string_lossy()
-        .to_string();
-    write_state_to(ff, &path).await
+    let (candidate_path, final_path) = state::auto_state_paths(session_name, session_id)?;
+    let candidate_path = candidate_path.to_string_lossy().to_string();
+    let candidate_path = write_state_to(ff, &candidate_path).await?;
+    state::promote_auto_state_candidate(&candidate_path, &final_path)
 }
 
 /// Run in a BiDi sandbox so page scripts never see the payload. The origin is checked in the same call so a redirect cannot race it, and the call returns false when the page landed elsewhere.
@@ -493,7 +471,7 @@ const RESTORE_STORAGE_JS: &str = r#"(expectedOrigin, payload) => {
 /// Loads the cookies and origin storage in a `state.rs` JSON file, dropping fields BiDi
 /// does not support, like Chrome's `handle_state_load`. Origins that redirect elsewhere are skipped and returned.
 pub async fn load_state_path(ff: &mut FirefoxSession, path: &str) -> Result<Vec<String>, String> {
-    let json_str = read_state_json(path)?;
+    let json_str = state::read_state_json(path)?;
     let state: StorageState =
         serde_json::from_str(&json_str).map_err(|e| format!("Invalid state file: {e}"))?;
 

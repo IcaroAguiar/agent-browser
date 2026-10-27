@@ -2624,7 +2624,7 @@ Usage: agent-browser cookies [operation] [args]
 Manage browser cookies for the current context.
 
 Operations:
-  get                                Get all cookies (default)
+  get                                Get cookies (Firefox defaults to active page and frames)
   set <name> <value> [options]       Set a cookie with optional properties
   clear                              Clear all cookies
 
@@ -2660,7 +2660,7 @@ Examples:
   # Set cookie with expiration (Unix timestamp)
   agent-browser cookies set temp_token "temp123" --expires 1735689600
 
-  # Get all cookies
+  # Get cookies for the active context
   agent-browser cookies
 
   # Clear all cookies

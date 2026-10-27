@@ -344,7 +344,7 @@ agent-browser set media [dark|light]  # Emulate color scheme
 ### Cookies & Storage
 
 ```bash
-agent-browser cookies                 # Get all cookies
+agent-browser cookies                 # Get cookies (Firefox defaults to active page and frames)
 agent-browser cookies set <name> <val> # Set cookie
 agent-browser cookies set --curl <file> # Import cookies from a Copy-as-cURL dump,
                                         # JSON array, or bare Cookie header (auto-detected)

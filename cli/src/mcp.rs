@@ -1333,7 +1333,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_COOKIES_GET,
             "Cookies get",
-            "Get cookies.",
+            "Get cookies. When URLs are omitted, Firefox filters to the active page and its frames.",
             json!({}),
             &[],
         ),

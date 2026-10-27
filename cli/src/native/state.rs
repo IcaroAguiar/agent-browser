@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::cdp::client::CdpClient;
 use super::cdp::types::{
@@ -349,7 +349,7 @@ pub async fn save_state(
     let json_str = serde_json::to_string_pretty(&state)
         .map_err(|e| format!("Failed to serialize state: {}", e))?;
 
-    let mut save_path = match path {
+    let save_path = match path {
         Some(p) => p.to_string(),
         None => {
             let dir = get_sessions_dir();
@@ -364,6 +364,11 @@ pub async fn save_state(
         }
     };
 
+    write_state_json(&save_path, &json_str)
+}
+
+pub(crate) fn write_state_json(path: &str, json_str: &str) -> Result<String, String> {
+    let mut save_path = path.to_string();
     if let Ok(key) = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY") {
         let encrypted = encrypt_data(json_str.as_bytes(), &key)?;
         save_path.push_str(".enc");
@@ -373,17 +378,13 @@ pub async fn save_state(
         write_private(&save_path, json_str.as_bytes())
             .map_err(|e| format!("Failed to write state to {}: {}", save_path, e))?;
     }
-
     Ok(save_path)
 }
 
-pub async fn save_auto_state_transactional(
-    client: &CdpClient,
-    session_id: &str,
+pub(crate) fn auto_state_paths(
     session_name: &str,
-    session_id_str: &str,
-    visited_origins: &HashSet<String>,
-) -> Result<String, String> {
+    session_id: &str,
+) -> Result<(PathBuf, PathBuf), String> {
     if !is_valid_session_name(session_name) {
         return Err(session_name_error(session_name));
     }
@@ -401,39 +402,35 @@ pub async fn save_auto_state_transactional(
         )
     })?;
 
-    let base_name = format!("{}-{}", session_name, session_id_str);
+    let base_name = format!("{}-{}", session_name, session_id);
     let final_json_path = dir.join(format!("{}.json", base_name));
     let final_path = if std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").is_ok() {
         PathBuf::from(format!("{}.enc", final_json_path.to_string_lossy()))
     } else {
         final_json_path
     };
-    let candidate_json_path = tmp_dir.join(format!(
+    let candidate_path = tmp_dir.join(format!(
         "{}-candidate-{}.json",
         base_name,
         std::process::id()
     ));
-    let candidate_arg = candidate_json_path.to_string_lossy().to_string();
 
-    let candidate_path = save_state(
-        client,
-        session_id,
-        Some(&candidate_arg),
-        Some(session_name),
-        session_id_str,
-        visited_origins,
-    )
-    .await?;
+    Ok((candidate_path, final_path))
+}
 
-    if let Err(err) = validate_state_file(&candidate_path) {
-        let _ = fs::remove_file(&candidate_path);
+pub(crate) fn promote_auto_state_candidate(
+    candidate_path: &str,
+    final_path: &Path,
+) -> Result<String, String> {
+    if let Err(err) = validate_state_file(candidate_path) {
+        let _ = fs::remove_file(candidate_path);
         return Err(err);
     }
 
     let previous_path = PathBuf::from(format!("{}.previous", final_path.to_string_lossy()));
     if final_path.exists() {
         let _ = fs::remove_file(&previous_path);
-        fs::rename(&final_path, &previous_path).map_err(|e| {
+        fs::rename(final_path, &previous_path).map_err(|e| {
             format!(
                 "Failed to rotate previous state {} to {}: {}",
                 final_path.display(),
@@ -443,10 +440,10 @@ pub async fn save_auto_state_transactional(
         })?;
     }
 
-    let candidate = PathBuf::from(&candidate_path);
-    if let Err(err) = fs::rename(&candidate, &final_path) {
+    let candidate = PathBuf::from(candidate_path);
+    if let Err(err) = fs::rename(&candidate, final_path) {
         if previous_path.exists() && !final_path.exists() {
-            let _ = fs::rename(&previous_path, &final_path);
+            let _ = fs::rename(&previous_path, final_path);
         }
         return Err(format!(
             "Failed to promote state {} to {}: {}",
@@ -462,7 +459,30 @@ pub async fn save_auto_state_transactional(
     Ok(final_path.to_string_lossy().to_string())
 }
 
-fn read_state_json(path: &str) -> Result<String, String> {
+pub async fn save_auto_state_transactional(
+    client: &CdpClient,
+    session_id: &str,
+    session_name: &str,
+    session_id_str: &str,
+    visited_origins: &HashSet<String>,
+) -> Result<String, String> {
+    let (candidate_json_path, final_path) = auto_state_paths(session_name, session_id_str)?;
+    let candidate_arg = candidate_json_path.to_string_lossy().to_string();
+
+    let candidate_path = save_state(
+        client,
+        session_id,
+        Some(&candidate_arg),
+        Some(session_name),
+        session_id_str,
+        visited_origins,
+    )
+    .await?;
+
+    promote_auto_state_candidate(&candidate_path, &final_path)
+}
+
+pub(crate) fn read_state_json(path: &str) -> Result<String, String> {
     if is_encrypted_state(std::path::Path::new(path)) {
         let key = std::env::var("AGENT_BROWSER_ENCRYPTION_KEY").map_err(|_| {
             "Encrypted state file requires AGENT_BROWSER_ENCRYPTION_KEY".to_string()

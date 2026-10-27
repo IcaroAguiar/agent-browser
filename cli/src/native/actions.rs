@@ -4972,11 +4972,21 @@ async fn validate_restore_if_pending(state: &mut DaemonState) {
 }
 
 async fn validate_restored_state(state: &DaemonState) -> Result<(), String> {
+    let timeout_ms = state.default_timeout_ms.min(2_000);
+    if let Some(ref ff) = state.firefox {
+        return firefox::storage::validate_restore(
+            ff,
+            state.restore_check_url.as_deref(),
+            state.restore_check_text.as_deref(),
+            state.restore_check_fn.as_deref(),
+            timeout_ms,
+        )
+        .await;
+    }
     let Some(ref mgr) = state.browser else {
         return Ok(());
     };
     let session_id = mgr.active_session_id()?.to_string();
-    let timeout_ms = state.default_timeout_ms.min(2_000);
 
     if let Some(ref pattern) = state.restore_check_url {
         let url = mgr.get_url().await.unwrap_or_default();

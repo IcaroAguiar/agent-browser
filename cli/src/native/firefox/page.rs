@@ -181,7 +181,7 @@ fn selector_check(selector: &str, state: &str) -> String {
 }
 
 /// Polls `expression` in the active context until it is truthy or the timeout expires.
-async fn poll_until_true(
+pub(super) async fn poll_until_true(
     ff: &FirefoxSession,
     expression: &str,
     timeout_ms: u64,
@@ -248,7 +248,7 @@ fn collapse_wildcards(pattern: &str) -> String {
 
 /// Matches a URL glob the way Chrome's `wait --url` does: `*` is a wildcard and a
 /// pattern without `*` is a substring match.
-fn url_matches(pattern: &str, url: &str) -> bool {
+pub(super) fn url_matches(pattern: &str, url: &str) -> bool {
     if pattern == "*" {
         return true;
     }
