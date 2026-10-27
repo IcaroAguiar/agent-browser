@@ -1257,6 +1257,8 @@ pub fn list_flows(origin: Option<&str>) -> Vec<Value> {
                 "origin": flow["origin"],
                 "params": flow["params"].as_array().map(|ps| ps.iter().map(|p| p["name"].clone()).collect::<Vec<_>>()).unwrap_or_default(),
                 "examples": flow["params"].as_array().map(|ps| ps.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["example"].clone()))).collect::<Map<String, Value>>()).unwrap_or_default(),
+                "description": tool_description(&flow),
+                "inputSchema": input_schema(&flow),
                 "paramSources": flow["params"].as_array().map(|ps| ps.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), json!(format!("{} {}", p["from"]["request"].as_str()?, p["from"]["list"].as_str()?))))).collect::<Map<String, Value>>()).unwrap_or_default(),
                 "itemFields": flow["itemFields"],
                 "recordedOn": flow["startUrl"],
@@ -1266,6 +1268,44 @@ pub fn list_flows(origin: Option<&str>) -> Vec<Value> {
         }
     }
     out
+}
+
+/// A one-line description in the shape of a WebMCP tool's.
+fn tool_description(flow: &Value) -> String {
+    let fields: Vec<&str> = flow["itemFields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.as_str())
+        .collect();
+    let mut out = format!(
+        "Replays the task recorded on {}",
+        flow["startUrl"].as_str().unwrap_or("this site")
+    );
+    if !fields.is_empty() {
+        out.push_str(&format!("; returns items with {}", fields.join(", ")));
+    }
+    out
+}
+
+/// The flow's params as a JSON Schema, the same shape WebMCP tools declare.
+/// Every param is optional: a run uses the recorded value when one is missing.
+pub fn input_schema(flow: &Value) -> Value {
+    let mut properties = Map::new();
+    for p in flow["params"].as_array().into_iter().flatten() {
+        let Some(name) = p["name"].as_str() else {
+            continue;
+        };
+        let mut description = format!("Recorded value: {}", p["example"].as_str().unwrap_or(""));
+        if let Some(list) = p["from"]["list"].as_str() {
+            description.push_str(&format!(". One of the site's {} values", list));
+        }
+        properties.insert(
+            name.to_string(),
+            json!({ "type": "string", "description": description }),
+        );
+    }
+    json!({ "type": "object", "properties": properties, "additionalProperties": false })
 }
 
 pub fn load_flow(name: &str, origin: Option<&str>) -> Result<Value, String> {
@@ -2439,6 +2479,24 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("login"));
+    }
+
+    #[test]
+    fn input_schema_describes_params_like_a_webmcp_tool() {
+        let flow = json!({
+            "params": [
+                { "name": "q", "example": "kettle" },
+                { "name": "storeId", "example": "401", "from": { "request": "s1r1", "list": "stores[].storeId" } },
+            ],
+        });
+        let schema = input_schema(&flow);
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["q"]["type"], "string");
+        assert!(schema["properties"]["storeId"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("stores[].storeId"));
+        assert!(schema.get("required").is_none());
     }
 
     #[test]

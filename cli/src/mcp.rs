@@ -4252,6 +4252,14 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
             // Render changed summaries once, through the same untrusted formatter as
             // CLI text, including when the primary result falls back to JSON.
             let mut primary = value.clone();
+            // Before the WebMCP context is taken out: the hint ranks flows after
+            // the page's declared tools.
+            let flow_hint = primary.get_mut("data").and_then(|data| {
+                data.get("url")?;
+                let hint = crate::output::format_flow_hint(data);
+                data.as_object_mut().map(|d| d.remove("flows"));
+                hint
+            });
             let contexts: Vec<String> = if let Some(results) = primary.as_array_mut() {
                 // Batch commands store each response's data under `result`.
                 results
@@ -4269,12 +4277,7 @@ fn tool_text(parsed: Option<&Value>, stdout: &str, stderr: &str) -> String {
                     .into_iter()
                     .collect()
             };
-            let flow_hint = primary.get_mut("data").and_then(|data| {
-                data.get("url")?;
-                let hint = crate::output::format_flow_hint(data);
-                data.as_object_mut().map(|d| d.remove("flows"));
-                hint
-            });
+
             let mut text = response_text(&primary).unwrap_or_else(|| {
                 serde_json::to_string_pretty(&primary).unwrap_or_else(|_| stdout.trim().to_string())
             });

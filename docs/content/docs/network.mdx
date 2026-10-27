@@ -157,7 +157,9 @@ Requests other than GET and GraphQL queries are writes and need `--allow-write`.
 
 ### Discovery
 
-After `open`, `back`, `forward`, `reload` or a tab switch, the response lists the saved flows for that site once per session, with their params, the recorded values and the item fields. `webmcp list` shows saved flows next to the tools the page declares.
+After `open`, `back`, `forward`, `reload` or a tab switch, the response lists the saved flows for that site once per session, with their params, the recorded values and the item fields. When the page also declares WebMCP tools, those come first and the hint suggests them when one covers the task.
+
+Saved flows use the shape of a WebMCP tool: a name, a description and an `inputSchema` built from the params. `flow list --json` returns that shape, and `webmcp list` shows saved flows in it, after the tools the page declares. Run them with `flow run`; `webmcp invoke` only calls the page's own tools.
 
 The MCP server exposes `agent_browser_flow_list`, `agent_browser_flow_run`, `agent_browser_flow_start` and `agent_browser_flow_save` in the core profile.
 

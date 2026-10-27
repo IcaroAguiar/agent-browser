@@ -199,10 +199,21 @@ pub(crate) fn format_flow_hint(data: &serde_json::Value) -> Option<String> {
     if flows.is_empty() {
         return None;
     }
-    let mut lines = vec![format!(
-        "Saved flows for this site ({}). Calling one is faster than driving the page:",
-        flows.len()
-    )];
+    let declared = data["webmcp"]["toolCount"].as_u64().unwrap_or(0) > 0
+        || data["webmcp"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty());
+    let mut lines = vec![if declared {
+        format!(
+            "Saved flows for this site ({}), observed by agent-browser. Prefer a WebMCP tool above when one covers the task; otherwise calling a flow is faster than driving the page:",
+            flows.len()
+        )
+    } else {
+        format!(
+            "Saved flows for this site ({}). Calling one is faster than driving the page:",
+            flows.len()
+        )
+    }];
     for f in flows {
         let params: Vec<String> = f["examples"]
             .as_object()
@@ -404,32 +415,24 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
     }
 }
 
-/// Saved flows for the page's site, listed after the tools the page declares.
+/// Saved flows for the page's site, listed after the tools the page declares
+/// and in the same shape: name, description and input schema.
 fn format_observed_flows(data: &serde_json::Value) -> Option<String> {
     let flows = data.get("observed")?.as_array().filter(|f| !f.is_empty())?;
     let mut lines =
         vec!["Observed by agent-browser (saved flows, not declared by the page):".to_string()];
     for f in flows {
         let name = f["name"].as_str().unwrap_or("");
-        let params: Vec<&str> = f["params"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|p| p.as_str())
-            .collect();
         lines.push(format!(
-            "{} [{}]\n  params: {}\n  run: agent-browser flow run {}",
+            "{} [{}]\n  {}\n  input: {}\n  run: agent-browser flow run {} --param key=value",
             name,
             if f["verifiedAt"].is_null() {
                 "unverified"
             } else {
                 "verified"
             },
-            if params.is_empty() {
-                "none".to_string()
-            } else {
-                params.join(", ")
-            },
+            f["description"].as_str().unwrap_or(""),
+            serde_json::to_string(&f["inputSchema"]["properties"]).unwrap_or_default(),
             name
         ));
     }
@@ -736,11 +739,7 @@ fn recording_fps_suffix(data: &serde_json::Value) -> String {
 
 pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &OutputOptions) {
     print_primary_response(resp, action, opts);
-    if !opts.json && action != Some("flow_list") {
-        if let Some(hint) = resp.data.as_ref().and_then(format_flow_hint) {
-            println!("{hint}");
-        }
-    }
+    // Tools the page declares come first; saved flows are the fallback.
     if !opts.json {
         if let Some(context) = resp
             .data
@@ -748,6 +747,11 @@ pub fn print_response_with_opts(resp: &Response, action: Option<&str>, opts: &Ou
             .and_then(|data| format_webmcp_context(data, opts))
         {
             println!("{context}");
+        }
+    }
+    if !opts.json && action != Some("flow_list") {
+        if let Some(hint) = resp.data.as_ref().and_then(format_flow_hint) {
+            println!("{hint}");
         }
     }
 }
