@@ -225,6 +225,18 @@ pub(crate) fn format_flow_hint(data: &serde_json::Value) -> Option<String> {
         if let Some(page) = f["recordedOn"].as_str() {
             lines.push(format!("    recorded on {}", page));
         }
+        if let Some(sources) = f["paramSources"].as_object() {
+            for (name, source) in sources {
+                let list = source
+                    .as_str()
+                    .unwrap_or("")
+                    .split_once(' ')
+                    .map(|(_, l)| l);
+                if let Some(list) = list {
+                    lines.push(format!("    {}: one of the site's {} values", name, list));
+                }
+            }
+        }
         if let Some(fields) = f["itemFields"].as_array().filter(|a| !a.is_empty()) {
             let names: Vec<&str> = fields.iter().filter_map(|x| x.as_str()).collect();
             lines.push(format!("    item fields: {}", names.join(", ")));

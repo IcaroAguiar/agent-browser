@@ -11826,6 +11826,18 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         .clone()
         .ok_or("no flow is recording; run `flow start <name>` first")?;
     let params = super::flow::parse_params(cmd)?;
+    let login_wall = match state.browser.as_ref() {
+        Some(mgr) => mgr
+            .evaluate(
+                "[...document.querySelectorAll('input[type=password]')].some(e => e.offsetParent !== null)",
+                None,
+            )
+            .await
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        None => false,
+    };
     let built = super::flow::build_flow(super::flow::SaveInput {
         name: &name,
         recorder: &state.flow,
@@ -11833,6 +11845,7 @@ async fn handle_flow_save(cmd: &Value, state: &mut DaemonState) -> Result<Value,
         params: &params,
         output: cmd.get("output").and_then(|v| v.as_str()),
         created_at: chrono::Utc::now().to_rfc3339(),
+        login_wall,
     });
     if state.flow.started_har {
         state.har_recording = false;
@@ -11871,7 +11884,15 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 
     let client = super::flow::http_client()?;
     let mut results = Vec::new();
-    for req in &requests {
+    let mut bodies: HashMap<String, Value> = HashMap::new();
+    for prepared in &requests {
+        let req = &match prepared.resolve(&bodies) {
+            Ok(r) => r,
+            Err(e) => {
+                results.push(super::flow::unresolved(prepared, e));
+                break;
+            }
+        };
         let mut done = false;
         for tier in super::flow::tiers_for(&flow, &req.id) {
             let result = match tier {
@@ -11895,6 +11916,9 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 _ => run_flow_replay(&flow, &params, req, state).await,
             };
             let (ok, drift) = (result.ok, result.drift);
+            if let Some(body) = result.body.as_ref().filter(|_| ok) {
+                bodies.insert(req.id.clone(), body.clone());
+            }
             // A write the site accepted must not be sent again by a lower tier.
             let accepted_write = super::flow::is_write(&req.method)
                 && result.status.is_some_and(|st| (200..300).contains(&st));

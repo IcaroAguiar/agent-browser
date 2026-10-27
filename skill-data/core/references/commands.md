@@ -241,6 +241,8 @@ agent-browser flow run <name> --where field=value --fields a,b.c --limit 5  # Re
 agent-browser flow list [--origin <host>]             # Saved flows, with params and verified state
 ```
 
+`flow save` also finds params on its own: a value the task sent that came from an item of an earlier response (an id picked from a list) becomes a param, and a value copied from a single field (a session key) is filled from that response on every run. The save report lists them, plus the steps it could not turn into requests and why, such as a login the recording stopped at.
+
 Flows live in `~/.agent-browser/flows/<origin>/<name>.json` (override with `AGENT_BROWSER_FLOWS_DIR`). Cookies, `authorization` and token or CSRF headers are never saved. A run tries direct HTTP, then the request from the page, then a replay of the recorded commands, and starts the next run at the tier that worked. Every tier checks the response shape against the recording; a mismatch marks the flow unverified. Non-GET requests need `--allow-write`.
 
 ## Tabs and Windows

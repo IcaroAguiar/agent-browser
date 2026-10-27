@@ -285,7 +285,11 @@ fn fill(template: &str, params: &HashMap<String, String>, encoded: bool) -> Resu
         };
         out = out.replace(&format!("{{{{{}}}}}", name), &v);
     }
-    if let Some(start) = out.find("{{") {
+    if let Some(start) = out
+        .match_indices("{{")
+        .map(|(i, _)| i)
+        .find(|i| !out[*i..].starts_with("{{@"))
+    {
         if let Some(len) = out[start..].find("}}") {
             return Err(format!("missing --param {}", &out[start + 2..start + len]));
         }
@@ -304,6 +308,8 @@ pub struct SaveInput<'a> {
     pub params: &'a [(String, String)],
     pub output: Option<&'a str>,
     pub created_at: String,
+    /// The page shows a password field at save time.
+    pub login_wall: bool,
 }
 
 fn start_url(commands: &[(u64, Value)]) -> Option<String> {
@@ -336,6 +342,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
     let mut gaps = Vec::new();
     let mut dropped_headers: Vec<String> = Vec::new();
     let mut request_ids: Vec<String> = Vec::new();
+    let mut bodies: Vec<(String, Value)> = Vec::new();
 
     for (index, (seq, cmd)) in input.recorder.commands.iter().enumerate() {
         let tagged: Vec<&HarEntry> = input
@@ -380,6 +387,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             }
             let item_fields = item_fields(&parsed);
             let id = format!("s{}r{}", index + 1, requests.len() + 1);
+            bodies.push((id.clone(), parsed.clone()));
             request_ids.push(id.clone());
             requests.push(json!({
                 "id": id,
@@ -411,7 +419,9 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
                 | "submit"
         );
         if requests.is_empty() && interactive {
-            let reason = if tagged.is_empty() {
+            let reason = if input.login_wall && index + 1 == input.recorder.commands.len() {
+                "the page asked for a login; this step needs an account, and the flow stops before it"
+            } else if tagged.is_empty() {
                 "no network traffic while this command ran"
             } else if tagged.iter().any(|e| is_first_party(&e.url, &base)) {
                 "first-party traffic was documents or static files, not a JSON API"
@@ -431,6 +441,13 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             base
         ));
     }
+    let links = link_requests(&mut steps, &bodies, input.params);
+    let mut params: Vec<Value> = input
+        .params
+        .iter()
+        .map(|(k, v)| json!({ "name": k, "example": v }))
+        .collect();
+    params.extend(links.params.iter().cloned());
     let output = match input.output {
         Some(id) if request_ids.iter().any(|r| r == id) => id.to_string(),
         Some(id) => return Err(format!("unknown request id '{}' for --output", id)),
@@ -443,7 +460,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         "origin": host,
         "startUrl": start,
         "createdAt": input.created_at,
-        "params": input.params.iter().map(|(k, v)| json!({ "name": k, "example": v })).collect::<Vec<_>>(),
+        "params": params,
         "output": output,
         "itemFields": steps
             .iter()
@@ -477,12 +494,232 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         "steps": input.recorder.commands.len(),
         "requests": requests_report,
         "output": output,
-        "params": input.params.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+        "params": params.iter().map(|p| p["name"].clone()).collect::<Vec<_>>(),
+        "detectedParams": links.params,
+        "references": links.references,
         "gaps": gaps,
         "droppedHeaders": dropped_headers,
         "verified": false,
     });
     Ok((flow, report))
+}
+
+// ---------------------------------------------------------------------------
+// Params and references found in the recording
+// ---------------------------------------------------------------------------
+
+struct Links {
+    /// Values that came from an item of an earlier list: the agent picks one.
+    params: Vec<Value>,
+    /// Values that came from a single field of an earlier response: filled in
+    /// at run time from that response.
+    references: Vec<Value>,
+}
+
+/// Values a request sends: query values, path segments and JSON body scalars.
+fn sent_values(req: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(url) = url::Url::parse(req["url"].as_str().unwrap_or("")) {
+        out.extend(url.query_pairs().map(|(_, v)| v.into_owned()));
+        if let Some(segs) = url.path_segments() {
+            out.extend(segs.map(|s| {
+                urlencoding::decode(s)
+                    .map(|d| d.into_owned())
+                    .unwrap_or_default()
+            }));
+        }
+    }
+    if let Some(body) = req["body"]
+        .as_str()
+        .and_then(|b| serde_json::from_str::<Value>(b).ok())
+    {
+        collect_scalars(&body, &mut out);
+    }
+    // Short values (ids like "1", flags like "es") match unrelated fields by chance.
+    out.retain(|v| v.chars().count() >= 3 && !v.contains("{{"));
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_scalars(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => m.values().for_each(|c| collect_scalars(c, out)),
+        Value::Array(a) => a.iter().for_each(|c| collect_scalars(c, out)),
+        Value::String(s) => out.push(s.clone()),
+        Value::Number(n) => out.push(n.to_string()),
+        _ => {}
+    }
+}
+
+/// Where `needle` sits in `body`, as a path like `token` or `data[].sessionId`,
+/// and whether the path crosses a list.
+fn find_value(body: &Value, needle: &str, path: &str) -> Option<(String, bool)> {
+    match body {
+        Value::Object(m) => m.iter().find_map(|(k, v)| {
+            let child = if path.is_empty() {
+                k.clone()
+            } else {
+                format!("{}.{}", path, k)
+            };
+            find_value(v, needle, &child)
+        }),
+        Value::Array(a) => a
+            .iter()
+            .find_map(|v| find_value(v, needle, &format!("{}[]", path)))
+            .map(|(p, _)| (p, true)),
+        Value::String(s) if s == needle => Some((path.to_string(), false)),
+        Value::Number(n) if n.to_string() == needle => Some((path.to_string(), false)),
+        _ => None,
+    }
+}
+
+fn link_requests(
+    steps: &mut [Value],
+    bodies: &[(String, Value)],
+    given: &[(String, String)],
+) -> Links {
+    let mut links = Links {
+        params: Vec::new(),
+        references: Vec::new(),
+    };
+    let given_values: Vec<&str> = given.iter().map(|(_, v)| v.as_str()).collect();
+    let order: Vec<String> = bodies.iter().map(|(id, _)| id.clone()).collect();
+    for step in steps.iter_mut() {
+        let Some(requests) = step["requests"].as_array_mut() else {
+            continue;
+        };
+        for req in requests.iter_mut() {
+            let id = req["id"].as_str().unwrap_or("").to_string();
+            let earlier = &bodies[..order.iter().position(|o| *o == id).unwrap_or(0)];
+            for value in sent_values(req) {
+                if given_values.contains(&value.as_str()) {
+                    continue;
+                }
+                let Some((from, path, in_list)) = earlier.iter().rev().find_map(|(from, body)| {
+                    find_value(body, &value, "").map(|(p, l)| (from.clone(), p, l))
+                }) else {
+                    continue;
+                };
+                let placeholder = if in_list {
+                    let field = path
+                        .rsplit(['.', ']'])
+                        .next()
+                        .unwrap_or("value")
+                        .to_string();
+                    let name = match links.params.iter().find(|p| p["example"] == value.as_str()) {
+                        Some(p) => p["name"].as_str().unwrap_or("").to_string(),
+                        None => {
+                            let mut name = field.clone();
+                            let mut n = 2;
+                            while links.params.iter().any(|p| p["name"] == name.as_str())
+                                || given.iter().any(|(k, _)| *k == name)
+                            {
+                                name = format!("{}{}", field, n);
+                                n += 1;
+                            }
+                            links.params.push(json!({
+                                "name": name,
+                                "example": value,
+                                "from": { "request": from, "list": path },
+                            }));
+                            name
+                        }
+                    };
+                    format!("{{{{{}}}}}", name)
+                } else {
+                    links
+                        .references
+                        .push(json!({ "request": id, "from": from, "path": path }));
+                    format!("{{{{@{}.{}}}}}", from, path)
+                };
+                for key in ["url", "body"] {
+                    if let Some(text) = req[key].as_str() {
+                        let encoded = urlencoding::encode(&value).into_owned();
+                        let replaced = text
+                            .replace(&encoded, &placeholder)
+                            .replace(&value, &placeholder);
+                        req[key] = json!(replaced);
+                    }
+                }
+            }
+        }
+    }
+    links
+}
+
+/// Values a reference placeholder in `text` points at, filled from the
+/// responses already received in this run.
+pub fn fill_references(
+    text: &str,
+    bodies: &HashMap<String, Value>,
+    encoded: bool,
+) -> Result<String, String> {
+    let mut out = text.to_string();
+    while let Some(start) = out.find("{{@") {
+        let Some(len) = out[start..].find("}}") else {
+            break;
+        };
+        let inner = out[start + 3..start + len].to_string();
+        let (from, path) = inner
+            .split_once('.')
+            .ok_or(format!("bad reference {}", inner))?;
+        let body = bodies
+            .get(from)
+            .ok_or(format!("reference to {} before it ran", from))?;
+        let value = lookup(body, path)
+            .map(as_text)
+            .ok_or(format!("{} no longer has '{}'", from, path))?;
+        let value = if encoded {
+            urlencoding::encode(&value).into_owned()
+        } else {
+            value
+        };
+        out.replace_range(start..start + len + 2, &value);
+    }
+    Ok(out)
+}
+
+/// Request ids a request needs answers from, in run order.
+pub fn dependencies(flow: &Value, id: &str) -> Vec<String> {
+    let requests: Vec<&Value> = flow["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s["requests"].as_array().into_iter().flatten())
+        .collect();
+    let refs_of = |rid: &str| -> Vec<String> {
+        requests
+            .iter()
+            .find(|r| r["id"] == rid)
+            .map(|r| {
+                let text = format!(
+                    "{} {}",
+                    r["url"].as_str().unwrap_or(""),
+                    r["body"].as_str().unwrap_or("")
+                );
+                text.match_indices("{{@")
+                    .filter_map(|(i, _)| text[i + 3..].split('.').next().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut needed = vec![id.to_string()];
+    let mut i = 0;
+    while i < needed.len() {
+        for dep in refs_of(&needed[i].clone()) {
+            if !needed.contains(&dep) {
+                needed.push(dep);
+            }
+        }
+        i += 1;
+    }
+    requests
+        .iter()
+        .filter_map(|r| r["id"].as_str())
+        .filter(|r| needed.iter().any(|n| n == r))
+        .map(String::from)
+        .collect()
 }
 
 /// Field names an agent can pass to `--where` and `--fields`: the keys of the
@@ -734,6 +971,7 @@ pub fn list_flows(origin: Option<&str>) -> Vec<Value> {
                 "origin": flow["origin"],
                 "params": flow["params"].as_array().map(|ps| ps.iter().map(|p| p["name"].clone()).collect::<Vec<_>>()).unwrap_or_default(),
                 "examples": flow["params"].as_array().map(|ps| ps.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["example"].clone()))).collect::<Map<String, Value>>()).unwrap_or_default(),
+                "paramSources": flow["params"].as_array().map(|ps| ps.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), json!(format!("{} {}", p["from"]["request"].as_str()?, p["from"]["list"].as_str()?))))).collect::<Map<String, Value>>()).unwrap_or_default(),
                 "itemFields": flow["itemFields"],
                 "recordedOn": flow["startUrl"],
                 "provenance": flow["provenance"],
@@ -776,6 +1014,7 @@ pub fn load_flow(name: &str, origin: Option<&str>) -> Result<Value, String> {
 // Run
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct PreparedRequest {
     pub id: String,
     pub step: usize,
@@ -786,16 +1025,17 @@ pub struct PreparedRequest {
     pub expect: Value,
 }
 
-/// Requests to send for a run: only the one the flow answers with, since
-/// values chained from earlier responses are not tracked yet.
+/// Requests to send for a run: the one the flow answers with, and the ones
+/// whose responses it takes values from.
 pub fn prepare(
     flow: &Value,
     cmd_params: &[(String, String)],
 ) -> Result<Vec<PreparedRequest>, String> {
     let output = flow["output"].as_str().unwrap_or("").to_string();
+    let needed = dependencies(flow, &output);
     Ok(prepare_all(flow, cmd_params)?
         .into_iter()
-        .filter(|r| output.is_empty() || r.id == output)
+        .filter(|r| output.is_empty() || needed.contains(&r.id))
         .collect())
 }
 
@@ -859,6 +1099,18 @@ pub fn prepare_all(
         }
     }
     Ok(out)
+}
+
+impl PreparedRequest {
+    /// Fill reference placeholders from the responses received so far.
+    pub fn resolve(&self, bodies: &HashMap<String, Value>) -> Result<PreparedRequest, String> {
+        let mut out = self.clone();
+        out.url = fill_references(&self.url, bodies, true)?;
+        if let Some(b) = &self.body {
+            out.body = Some(fill_references(b, bodies, false)?);
+        }
+        Ok(out)
+    }
 }
 
 pub fn is_write(method: &str) -> bool {
@@ -1247,6 +1499,16 @@ pub fn replay_unavailable(req: &PreparedRequest, started: Instant, reason: Strin
     )
 }
 
+/// A reference the run could not fill: the earlier response changed.
+pub fn unresolved(req: &PreparedRequest, reason: String) -> TierResult {
+    tier_result(
+        req,
+        "http",
+        Instant::now(),
+        Err(Failure::new(true, None, reason)),
+    )
+}
+
 /// Tiers to try for a request, starting from the one that last worked.
 pub fn tiers_for(flow: &Value, id: &str) -> Vec<&'static str> {
     let preferred = flow["steps"]
@@ -1453,6 +1715,7 @@ mod tests {
             params: &params,
             output: None,
             created_at: "2026-10-26T00:00:00Z".to_string(),
+            login_wall: false,
         })
         .unwrap();
         let req = &flow["steps"][0]["requests"][0];
@@ -1490,6 +1753,7 @@ mod tests {
             params: &[],
             output: None,
             created_at: String::new(),
+            login_wall: false,
         })
         .unwrap_err();
         assert!(err.contains("no first-party JSON requests"));
@@ -1690,5 +1954,99 @@ mod tests {
                 .contains("theater")
         );
         assert!(replay_commands(&hidden, &[]).is_ok());
+    }
+
+    #[test]
+    fn save_turns_list_values_into_params_and_single_values_into_references() {
+        let mut r = FlowRecorder::default();
+        r.start("seats", true);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/" }),
+        );
+        for id in ["theaters", "token", "seats"] {
+            r.tag_request(id);
+        }
+        let entries = vec![
+            entry(
+                "theaters",
+                "https://api.example.com.ar/theaters",
+                "Fetch",
+                "application/json",
+                r#"{"data":[{"theaterId":"401"},{"theaterId":"402"}]}"#,
+            ),
+            entry(
+                "token",
+                "https://api.example.com.ar/session",
+                "Fetch",
+                "application/json",
+                r#"{"session":{"key":"k-81f2"}}"#,
+            ),
+            entry(
+                "seats",
+                "https://api.example.com.ar/seats?theater=401&key=k-81f2",
+                "Fetch",
+                "application/json",
+                r#"{"seats":[{"row":"A"}]}"#,
+            ),
+        ];
+        let (flow, report) = build_flow(SaveInput {
+            name: "seats",
+            recorder: &r,
+            entries: &entries,
+            params: &[],
+            output: Some("s1r3"),
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let seats = &flow["steps"][0]["requests"][2];
+        assert_eq!(
+            seats["url"],
+            "https://api.example.com.ar/seats?theater={{theaterId}}&key={{@s1r2.session.key}}"
+        );
+        assert_eq!(
+            report["detectedParams"][0]["from"]["list"],
+            "data[].theaterId"
+        );
+        assert_eq!(report["references"][0]["path"], "session.key");
+        assert_eq!(dependencies(&flow, "s1r3"), vec!["s1r2", "s1r3"]);
+
+        let reqs = prepare(&flow, &[("theaterId".to_string(), "402".to_string())]).unwrap();
+        assert_eq!(reqs.len(), 2);
+        let mut bodies = HashMap::new();
+        bodies.insert("s1r2".to_string(), json!({ "session": { "key": "k 2" } }));
+        let filled = reqs[1].resolve(&bodies).unwrap();
+        assert_eq!(
+            filled.url,
+            "https://api.example.com.ar/seats?theater=402&key=k%202"
+        );
+        assert!(reqs[1].resolve(&HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn a_login_wall_names_the_last_gap() {
+        let rec = recorder();
+        let entries = vec![entry(
+            "api",
+            "https://api.example.com.ar/movies",
+            "Fetch",
+            "application/json",
+            r#"{"movies":[]}"#,
+        )];
+        let (_, report) = build_flow(SaveInput {
+            name: "showtimes",
+            recorder: &rec,
+            entries: &entries,
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: true,
+        })
+        .unwrap();
+        assert!(report["gaps"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("login"));
     }
 }
