@@ -2550,6 +2550,7 @@ Subcommands:
   route <url> [options]      Intercept requests matching URL pattern
     --abort                  Abort matching requests
     --body <json>            Respond with custom body
+    --allow-origin <origin>  Let a page on <origin> read the mocked body cross-origin
   unroute [url]              Remove route (all if no URL)
   requests [options]         List captured requests
     --clear                  Clear request log
@@ -3903,7 +3904,7 @@ Browser Settings:  agent-browser set <setting> [value]
   media [dark|light] [reduced-motion]
 
 Network:  agent-browser network <action>
-  route <url> [--abort|--body <json>] [--resource-type <csv>]
+  route <url> [--abort|--body <json> [--allow-origin <origin>]] [--resource-type <csv>]
   unroute [url]
   requests [--clear] [--filter <pattern>]
   har <start|stop> [path]

@@ -1201,7 +1201,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_NETWORK_ROUTE,
             "Network route",
             "Route matching requests.",
-            json!({ "url": { "type": "string" }, "abort": { "type": "boolean" }, "body": { "type": "string" }, "resourceType": { "type": "string", "description": "Comma-separated resource types." } }),
+            json!({ "url": { "type": "string" }, "abort": { "type": "boolean" }, "body": { "type": "string" }, "allowOrigin": { "type": "string", "description": "Origin allowed to read the mocked body cross-origin." }, "resourceType": { "type": "string", "description": "Comma-separated resource types." } }),
             &["url"],
         ),
         tool(
@@ -3136,6 +3136,10 @@ fn call_network_route(arguments: &Value) -> Result<Value, ProtocolError> {
     if let Some(body) = optional_string(arguments, "body")? {
         args.push("--body".to_string());
         args.push(body);
+    }
+    if let Some(origin) = optional_string(arguments, "allowOrigin")? {
+        args.push("--allow-origin".to_string());
+        args.push(origin);
     }
     if let Some(resource_type) = optional_string(arguments, "resourceType")? {
         args.push("--resource-type".to_string());

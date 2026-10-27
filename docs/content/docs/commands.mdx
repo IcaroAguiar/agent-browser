@@ -221,6 +221,7 @@ agent-browser storage session         # Same for sessionStorage
 agent-browser network route <url>              # Intercept requests
 agent-browser network route <url> --abort      # Block requests
 agent-browser network route <url> --body <json>  # Mock response
+agent-browser network route <url> --body <json> --allow-origin <origin>  # Mock readable cross-origin
 agent-browser network route '*' --abort --resource-type script  # Block scripts only
 agent-browser network unroute [url]            # Remove routes
 agent-browser network requests                 # View tracked requests
