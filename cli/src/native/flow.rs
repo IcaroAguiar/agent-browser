@@ -1330,6 +1330,22 @@ pub async fn run_http(
     if let Some(cookie) = cookie_header.filter(|c| !c.is_empty()) {
         builder = builder.header("cookie", cookie);
     }
+    // Browsers send Origin on every write; sites check it against CSRF.
+    let has_origin = req
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("origin"));
+    if is_write(&req.method, req.body.as_deref()) && !has_origin {
+        if let Some(origin) = req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
+            .and_then(|(_, v)| url::Url::parse(v).ok())
+            .map(|u| u.origin().ascii_serialization())
+        {
+            builder = builder.header("origin", origin);
+        }
+    }
     if let Some(body) = &req.body {
         builder = builder.body(body.clone());
     }

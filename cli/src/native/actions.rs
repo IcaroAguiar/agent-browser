@@ -11947,8 +11947,12 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
             let accepted_write = super::flow::is_write(&req.method, req.body.as_deref())
                 && result.status.is_some_and(|st| (200..300).contains(&st));
             results.push(result);
-            // A rejected input fails the same way on every tier.
-            if ok || !drift || accepted_write {
+            // A rejected input fails the same way on every tier, except a
+            // write the site did not accept: its request tokens may be stale,
+            // and the page or the UI can still send it once.
+            let retry_write =
+                super::flow::is_write(&req.method, req.body.as_deref()) && !accepted_write;
+            if ok || (!drift && !retry_write) || accepted_write {
                 done = ok;
                 break;
             }
