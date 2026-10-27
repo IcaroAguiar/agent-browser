@@ -11888,7 +11888,10 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if !allow_write {
-        if let Some(w) = requests.iter().find(|r| super::flow::is_write(&r.method)) {
+        if let Some(w) = requests
+            .iter()
+            .find(|r| super::flow::is_write(&r.method, r.body.as_deref()))
+        {
             return Err(format!(
                 "flow '{}' sends {} {} (step {}); rerun with --allow-write to send it",
                 name, w.method, w.url, w.step
@@ -11934,7 +11937,7 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 bodies.insert(req.id.clone(), body.clone());
             }
             // A write the site accepted must not be sent again by a lower tier.
-            let accepted_write = super::flow::is_write(&req.method)
+            let accepted_write = super::flow::is_write(&req.method, req.body.as_deref())
                 && result.status.is_some_and(|st| (200..300).contains(&st));
             results.push(result);
             // A rejected input fails the same way on every tier.

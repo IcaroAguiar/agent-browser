@@ -353,7 +353,12 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         let mut requests = Vec::new();
         let mut seen = Vec::new();
         for e in tagged.iter().filter(|e| is_api_entry(e, &base)) {
-            let key = format!("{} {}", e.method, e.url);
+            let key = format!(
+                "{} {} {}",
+                e.method,
+                e.url,
+                e.post_data.as_deref().unwrap_or("")
+            );
             if seen.contains(&key) {
                 continue;
             }
@@ -1113,8 +1118,27 @@ impl PreparedRequest {
     }
 }
 
-pub fn is_write(method: &str) -> bool {
-    !matches!(method, "GET" | "HEAD" | "OPTIONS")
+pub fn is_write(method: &str, body: Option<&str>) -> bool {
+    !matches!(method, "GET" | "HEAD" | "OPTIONS") && !is_graphql_query(body)
+}
+
+/// A GraphQL POST that only runs queries reads data; mutations still count
+/// as writes.
+fn is_graphql_query(body: Option<&str>) -> bool {
+    let Some(parsed) = body.and_then(|b| serde_json::from_str::<Value>(b).ok()) else {
+        return false;
+    };
+    let ops: Vec<&Value> = match &parsed {
+        Value::Array(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    !ops.is_empty()
+        && ops.iter().all(|op| {
+            op["query"].as_str().is_some_and(|q| {
+                let q = q.trim_start();
+                (q.starts_with("query") || q.starts_with('{')) && !q.contains("mutation")
+            })
+        })
 }
 
 pub const TIERS: &[&str] = &["http", "page", "replay"];
@@ -2048,5 +2072,20 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("login"));
+    }
+
+    #[test]
+    fn graphql_queries_are_reads_and_mutations_are_writes() {
+        assert!(!is_write("GET", None));
+        assert!(is_write("POST", Some(r#"{"a":1}"#)));
+        assert!(!is_write(
+            "POST",
+            Some(r#"{"query":"query appConfig { x }"}"#)
+        ));
+        assert!(!is_write("POST", Some(r#"[{"query":"{ me { id } }"}]"#)));
+        assert!(is_write(
+            "POST",
+            Some(r#"{"query":"mutation buy { order }"}"#)
+        ));
     }
 }
