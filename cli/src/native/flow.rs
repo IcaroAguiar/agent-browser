@@ -402,7 +402,10 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             }
             let item_fields = item_fields(&parsed);
             let id = format!("s{}r{}", index + 1, requests.len() + 1);
-            bodies.push((id.clone(), parsed.clone()));
+            // A write's response is not a source: the flow would have to send it.
+            if !is_write(&e.method, e.post_data.as_deref()) {
+                bodies.push((id.clone(), parsed.clone()));
+            }
             request_ids.push(id.clone());
             requests.push(json!({
                 "id": id,
@@ -568,6 +571,33 @@ fn collect_scalars(v: &Value, out: &mut Vec<String>) {
     }
 }
 
+fn looks_generated(v: &str) -> bool {
+    let mixed_case =
+        v.chars().any(|c| c.is_ascii_uppercase()) && v.chars().any(|c| c.is_ascii_lowercase());
+    v.chars().count() >= 6 && (v.chars().any(|c| c.is_ascii_digit()) || mixed_case)
+}
+
+/// Replace `needle` only where it stands alone, not inside a longer word:
+/// `401` in `theater=401`, never in `14011`.
+fn replace_token(text: &str, needle: &str, with: &str) -> String {
+    if needle.is_empty() {
+        return text.to_string();
+    }
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find(needle) {
+        let before = rest[..i].chars().next_back();
+        let after = rest[i + needle.len()..].chars().next();
+        let bounded = !before.is_some_and(word) && !after.is_some_and(word);
+        out.push_str(&rest[..i]);
+        out.push_str(if bounded { with } else { needle });
+        rest = &rest[i + needle.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Where `needle` sits in `body`, as a path like `token` or `data[].sessionId`,
 /// and whether the path crosses a list.
 fn find_value(body: &Value, needle: &str, path: &str) -> Option<(String, bool)> {
@@ -617,6 +647,11 @@ fn link_requests(
                 }) else {
                     continue;
                 };
+                // Words and codes like "es-AR" or "public" repeat across a site's
+                // responses; only generated values (ids, keys) are worth chaining.
+                if !in_list && !looks_generated(&value) {
+                    continue;
+                }
                 let placeholder = if in_list {
                     let field = path
                         .rsplit(['.', ']'])
@@ -652,9 +687,11 @@ fn link_requests(
                 for key in ["url", "body"] {
                     if let Some(text) = req[key].as_str() {
                         let encoded = urlencoding::encode(&value).into_owned();
-                        let replaced = text
-                            .replace(&encoded, &placeholder)
-                            .replace(&value, &placeholder);
+                        let replaced = replace_token(
+                            &replace_token(text, &encoded, &placeholder),
+                            &value,
+                            &placeholder,
+                        );
                         req[key] = json!(replaced);
                     }
                 }
@@ -2165,5 +2202,20 @@ mod tests {
         assert_eq!(replay_match(&entries, &req).unwrap().request_id, "b");
         req.body = Some(r#"{"operationName":"other"}"#.to_string());
         assert!(replay_match(&entries, &req).is_none());
+    }
+
+    #[test]
+    fn replace_token_leaves_longer_words_alone() {
+        assert_eq!(
+            replace_token("theater=401&t=14011", "401", "{{t}}"),
+            "theater={{t}}&t=14011"
+        );
+        assert_eq!(
+            replace_token("publicSettingsForApp&p=public", "public", "{{p}}"),
+            "publicSettingsForApp&p={{p}}"
+        );
+        assert!(looks_generated("R_kgDOUQ"));
+        assert!(!looks_generated("es-AR"));
+        assert!(!looks_generated("public"));
     }
 }
