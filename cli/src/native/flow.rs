@@ -334,8 +334,128 @@ fn describe_command(cmd: &Value) -> String {
     }
 }
 
+/// Data a recorded request can answer with: the JSON body of an API call,
+/// or each JSON block embedded in a first-party HTML document (Next.js
+/// `__NEXT_DATA__`, JSON-LD, framework state), for sites that render on the
+/// server.
+fn candidates<'a>(
+    tagged: &[&'a HarEntry],
+    base: &str,
+) -> Vec<(&'a HarEntry, Value, Option<Value>)> {
+    let mut out = Vec::new();
+    for e in tagged.iter().copied() {
+        let Some(body) = e
+            .response_body
+            .as_deref()
+            .filter(|_| !e.response_body_base64)
+        else {
+            continue;
+        };
+        if is_api_entry(e, base) {
+            if let Ok(parsed) = serde_json::from_str::<Value>(body) {
+                out.push((e, parsed, None));
+            }
+        } else if is_document_entry(e, base) {
+            for (spec, parsed) in embedded_json(body) {
+                out.push((e, parsed, Some(spec)));
+            }
+        }
+    }
+    out
+}
+
+fn is_document_entry(e: &HarEntry, base: &str) -> bool {
+    e.resource_type == "Document"
+        && e.method == "GET"
+        && e.mime_type.contains("html")
+        && e.status.map(|s| (200..300).contains(&s)).unwrap_or(false)
+        && is_first_party(&e.url, base)
+}
+
+/// `<script>` blocks whose whole content is a JSON object or array, each with
+/// a spec that finds it again: its `id` if it has one, else its position.
+pub fn embedded_json(html: &str) -> Vec<(Value, Value)> {
+    let mut out = Vec::new();
+    let lower = html.to_ascii_lowercase();
+    let mut pos = 0;
+    let mut index = 0;
+    while let Some(start) = lower[pos..].find("<script") {
+        let open = pos + start;
+        let Some(tag_end) = lower[open..].find('>').map(|i| open + i) else {
+            break;
+        };
+        let Some(close) = lower[tag_end..].find("</script").map(|i| tag_end + i) else {
+            break;
+        };
+        let attrs = &html[open + 7..tag_end];
+        let content = html[tag_end + 1..close].trim();
+        pos = close + 8;
+        let ty = attr(attrs, "type").unwrap_or_default().to_ascii_lowercase();
+        if !(ty.is_empty() || ty.contains("json")) {
+            continue;
+        }
+        let content = assigned_value(content).unwrap_or(content);
+        if !(content.starts_with('{') || content.starts_with('[')) {
+            continue;
+        }
+        let Ok(parsed) = serde_json::from_str::<Value>(content) else {
+            continue;
+        };
+        let spec = match attr(attrs, "id") {
+            Some(id) => json!({ "scriptId": id }),
+            None => json!({ "scriptIndex": index }),
+        };
+        index += 1;
+        out.push((spec, parsed));
+    }
+    out
+}
+
+/// The JSON in a script that only assigns it: `window.__context__ = {...};`.
+fn assigned_value(content: &str) -> Option<&str> {
+    let eq = content.find('=')?;
+    let target = content[..eq].trim();
+    let target = ["window.", "self.", "var ", "let ", "const "]
+        .iter()
+        .find_map(|p| target.strip_prefix(p))
+        .unwrap_or(target)
+        .trim();
+    let simple = !target.is_empty()
+        && target.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '.' | '[' | ']' | '"' | '\'')
+        });
+    simple.then(|| content[eq + 1..].trim().trim_end_matches(';').trim())
+}
+
+fn attr(attrs: &str, name: &str) -> Option<String> {
+    let lower = attrs.to_ascii_lowercase();
+    let at = lower.find(&format!("{}=", name))?;
+    let rest = &attrs[at + name.len() + 1..];
+    let (quote, rest) = match rest.chars().next()? {
+        q @ ('"' | '\'') => (q, &rest[1..]),
+        _ => (' ', rest),
+    };
+    let end = rest
+        .find(|c: char| c == quote || (quote == ' ' && c == '>'))
+        .unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
+/// Pull the recorded JSON block back out of a document body.
+pub fn extract_embedded(html: &str, spec: &Value) -> Option<String> {
+    embedded_json(html)
+        .into_iter()
+        .find(|(s, _)| {
+            (spec.get("scriptId").is_some() && s.get("scriptId") == spec.get("scriptId"))
+                || (spec.get("scriptIndex").is_some()
+                    && s.get("scriptIndex") == spec.get("scriptIndex"))
+        })
+        .map(|(_, v)| v.to_string())
+}
+
 /// Params the agent passed, plus query values of the start URL that the
-/// recorded API requests sent too (`?q=tea` -> param `q`).
+/// recorded requests sent too (`?q=tea` -> param `q`), including the page
+/// itself when its HTML embeds the data.
 fn with_page_query_params(
     start: &str,
     base: &str,
@@ -353,7 +473,11 @@ fn with_page_query_params(
         }
         let encoded = urlencoding::encode(&value).into_owned();
         let sent = entries.iter().any(|e| {
-            is_api_entry(e, base)
+            (is_api_entry(e, base)
+                || (is_document_entry(e, base)
+                    && e.response_body
+                        .as_deref()
+                        .is_some_and(|b| !embedded_json(b).is_empty())))
                 && (e.url.contains(&encoded)
                     || e.post_data.as_deref().is_some_and(|b| b.contains(&value)))
         });
@@ -384,6 +508,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
     let mut dropped_headers: Vec<String> = Vec::new();
     let mut request_ids: Vec<String> = Vec::new();
     let mut bodies: Vec<(String, Value)> = Vec::new();
+    let mut har_ids: HashMap<String, String> = HashMap::new();
 
     for (index, (seq, cmd)) in input.recorder.commands.iter().enumerate() {
         let tagged: Vec<&HarEntry> = input
@@ -393,27 +518,19 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             .collect();
         let mut requests = Vec::new();
         let mut seen = Vec::new();
-        for e in tagged.iter().filter(|e| is_api_entry(e, &base)) {
+        for (e, parsed, extract) in candidates(&tagged, &base) {
             let key = format!(
-                "{} {} {}",
+                "{} {} {} {}",
                 e.method,
                 e.url,
-                e.post_data.as_deref().unwrap_or("")
+                e.post_data.as_deref().unwrap_or(""),
+                extract.as_ref().map(|x| x.to_string()).unwrap_or_default()
             );
             if seen.contains(&key) {
                 continue;
             }
             seen.push(key);
-            let Some(body) = e
-                .response_body
-                .as_deref()
-                .filter(|_| !e.response_body_base64)
-            else {
-                continue;
-            };
-            let Ok(parsed) = serde_json::from_str::<Value>(body) else {
-                continue;
-            };
+            let body_len = serde_json::to_string(&parsed).map(|t| t.len()).unwrap_or(0);
             let mut headers = Map::new();
             for (k, v) in &e.request_headers {
                 let lower = k.to_ascii_lowercase();
@@ -438,6 +555,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
                 bodies.push((id.clone(), parsed.clone()));
             }
             request_ids.push(id.clone());
+            har_ids.insert(id.clone(), e.request_id.clone());
             requests.push(json!({
                 "id": id,
                 "method": e.method,
@@ -448,8 +566,9 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
                     "status": e.status,
                     "mime": e.mime_type,
                     "signature": signature(&parsed),
-                    "bytes": body.len(),
+                    "bytes": body_len,
                     "itemFields": item_fields,
+                    "extract": extract,
                 },
             }));
         }
@@ -491,7 +610,11 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             base
         ));
     }
-    let links = link_requests(&mut steps, &bodies, &given);
+    let page_segments: Vec<String> = url::Url::parse(&start)
+        .ok()
+        .and_then(|u| u.path_segments().map(|p| p.map(String::from).collect()))
+        .unwrap_or_default();
+    let links = link_requests(&mut steps, &bodies, &har_ids, &page_segments, &given);
     let mut params: Vec<Value> = given
         .iter()
         .map(|(k, v)| {
@@ -663,6 +786,8 @@ fn find_value(body: &Value, needle: &str, path: &str) -> Option<(String, bool)> 
 fn link_requests(
     steps: &mut [Value],
     bodies: &[(String, Value)],
+    har_ids: &HashMap<String, String>,
+    page_segments: &[String],
     given: &[(String, String)],
 ) -> Links {
     let mut links = Links {
@@ -679,12 +804,23 @@ fn link_requests(
             let id = req["id"].as_str().unwrap_or("").to_string();
             let earlier = &bodies[..order.iter().position(|o| *o == id).unwrap_or(0)];
             for value in sent_values(req) {
-                if given_values.contains(&value.as_str()) {
+                // The page's own path (owner, repo, section) is the site's
+                // structure, not a choice the run makes.
+                if given_values.contains(&value.as_str()) || page_segments.contains(&value) {
                     continue;
                 }
-                let Some((from, path, in_list)) = earlier.iter().rev().find_map(|(from, body)| {
-                    find_value(body, &value, "").map(|(p, l)| (from.clone(), p, l))
-                }) else {
+                // Blocks of the same document are one response, not a chain.
+                let same_response = |from: &str| {
+                    har_ids.get(from).is_some() && har_ids.get(from) == har_ids.get(&id)
+                };
+                let Some((from, path, in_list)) = earlier
+                    .iter()
+                    .rev()
+                    .filter(|(from, _)| !same_response(from))
+                    .find_map(|(from, body)| {
+                        find_value(body, &value, "").map(|(p, l)| (from.clone(), p, l))
+                    })
+                else {
                     continue;
                 };
                 // Words and codes like "es-AR" or "public" repeat across a site's
@@ -1361,6 +1497,18 @@ pub fn tier_result(
     outcome: Result<(u16, String), Failure>,
 ) -> TierResult {
     let ms = started.elapsed().as_millis();
+    let outcome = match req.expect.get("extract").filter(|x| !x.is_null()) {
+        Some(spec) => outcome.and_then(|(status, text)| match extract_embedded(&text, spec) {
+            Some(json) => Ok((status, json)),
+            None if (200..300).contains(&status) => Err(Failure::new(
+                true,
+                Some(status),
+                "the page no longer embeds the recorded data".to_string(),
+            )),
+            None => Ok((status, text)),
+        }),
+        None => outcome,
+    };
     let checked = outcome
         .and_then(|(status, text)| check_response(req, status, &text).map(|body| (status, body)));
     match checked {
@@ -2333,5 +2481,22 @@ mod tests {
         let out = apply_shape(body, &shape);
         assert_eq!(out["list"], "data.items.results");
         assert_eq!(out["items"], json!([{ "item.title": "A" }]));
+    }
+
+    #[test]
+    fn embedded_json_finds_script_blocks_and_assignments() {
+        let html = r#"<html><script>console.log(1)</script>
+<script id="__NEXT_DATA__" type="application/json">{"props":{"items":[{"id":1}]}}</script>
+<script type="application/ld+json">[{"@type":"Product"}]</script>
+<script>window.__context__ = {"packages":[{"name":"a"}]};</script></html>"#;
+        let blocks = embedded_json(html);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].0, json!({ "scriptId": "__NEXT_DATA__" }));
+        assert_eq!(blocks[2].1["packages"][0]["name"], "a");
+        let back = extract_embedded(html, &json!({ "scriptIndex": 2 })).unwrap();
+        assert!(back.contains("packages"));
+        assert!(
+            extract_embedded("<html></html>", &json!({ "scriptId": "__NEXT_DATA__" })).is_none()
+        );
     }
 }
