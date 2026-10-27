@@ -21,6 +21,8 @@ pub struct FlowRecorder {
     pub request_tags: HashMap<String, u64>,
     pub current_seq: Option<u64>,
     pub started_har: bool,
+    /// The tab's URL when recording began, for flows that start on an open page.
+    pub page_url: Option<String>,
     next_seq: u64,
 }
 
@@ -33,6 +35,7 @@ impl FlowRecorder {
         *self = FlowRecorder {
             name: Some(name.to_string()),
             started_har,
+            page_url: None,
             ..FlowRecorder::default()
         };
     }
@@ -334,7 +337,14 @@ fn describe_command(cmd: &Value) -> String {
 /// Build the flow file and the save report from what was recorded.
 pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
     let start = start_url(&input.recorder.commands)
-        .ok_or("nothing to save: the flow has no `open <url>` command")?;
+        .or_else(|| {
+            input
+                .recorder
+                .page_url
+                .clone()
+                .filter(|u| u.starts_with("http"))
+        })
+        .ok_or("nothing to save: the flow has no `open <url>` command and no page was open")?;
     let host = host_of(&start).ok_or("the flow's start URL has no host")?;
     let base = base_domain(&host);
 
@@ -1435,21 +1445,35 @@ pub fn replay_commands(
             name, from
         ));
     }
-    Ok(flow["steps"]
+    let opens_page = flow["steps"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|s| {
-            let mut text = serde_json::to_string(&s["command"]).ok()?;
-            for (from, to) in &swaps {
-                text = text.replace(from.as_str(), to);
-                let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
-                if ef != *from {
-                    text = text.replace(ef.as_ref(), et.as_ref());
-                }
-            }
-            serde_json::from_str(&text).ok()
-        })
+        .any(|s| s["command"]["action"] == "navigate");
+    // A flow recorded on an already open page starts from that page.
+    let start = (!opens_page)
+        .then(|| flow["startUrl"].as_str())
+        .flatten()
+        .map(|u| json!({ "action": "navigate", "url": u }));
+    Ok(start
+        .into_iter()
+        .chain(
+            flow["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| {
+                    let mut text = serde_json::to_string(&s["command"]).ok()?;
+                    for (from, to) in &swaps {
+                        text = text.replace(from.as_str(), to);
+                        let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
+                        if ef != *from {
+                            text = text.replace(ef.as_ref(), et.as_ref());
+                        }
+                    }
+                    serde_json::from_str(&text).ok()
+                }),
+        )
         .collect())
 }
 

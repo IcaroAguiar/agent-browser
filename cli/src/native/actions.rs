@@ -11830,6 +11830,10 @@ async fn handle_flow_start(cmd: &Value, state: &mut DaemonState) -> Result<Value
         handle_har_start(&json!({}), state).await?;
     }
     state.flow.start(name, started_har);
+    state.flow.page_url = match state.browser.as_ref() {
+        Some(mgr) => mgr.get_url().await.ok(),
+        None => None,
+    };
     Ok(json!({ "name": name, "recording": true }))
 }
 
