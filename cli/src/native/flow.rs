@@ -49,6 +49,7 @@ impl FlowRecorder {
         if let Some(obj) = recorded.as_object_mut() {
             obj.remove("id");
         }
+        redact_secret(&mut recorded);
         self.commands.push((self.next_seq, recorded));
         self.current_seq = Some(self.next_seq);
     }
@@ -60,10 +61,48 @@ impl FlowRecorder {
     }
 }
 
+/// A value typed into a field that looks like a password or code is never
+/// stored; the flow keeps a marker and cannot be replayed through the UI.
+fn redact_secret(cmd: &mut Value) {
+    let Some(obj) = cmd.as_object_mut() else {
+        return;
+    };
+    if obj.get("value").is_none() {
+        return;
+    }
+    let target = ["selector", "name", "label", "placeholder"]
+        .iter()
+        .filter_map(|k| obj.get(*k).and_then(|v| v.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    let secret = [
+        "pass",
+        "contraseña",
+        "secret",
+        "token",
+        "otp",
+        "pin",
+        "cvv",
+        "card",
+    ]
+    .iter()
+    .any(|m| target.contains(m));
+    if secret {
+        obj.insert("value".to_string(), json!(REDACTED));
+        obj.insert("redacted".to_string(), json!(true));
+    }
+}
+
+pub const REDACTED: &str = "<redacted>";
+
 fn is_recordable(action: &str) -> bool {
     !(action.is_empty()
         || action.starts_with("flow_")
         || action.starts_with("har_")
+        || action.starts_with("auth_")
+        || action.starts_with("credentials")
+        || matches!(action, "cookies_set" | "storage_set")
         || matches!(
             action,
             "close" | "session_info" | "requests" | "request_detail" | "cookies_get"
@@ -332,6 +371,37 @@ fn fill(template: &str, params: &HashMap<String, String>, encoded: bool) -> Resu
         }
     }
     Ok(out)
+}
+
+/// Apply `f` to every string in a JSON body and serialize it again, so a
+/// value with quotes or backslashes stays valid JSON. Bodies that are not
+/// JSON go through `f` as plain text.
+fn map_body(body: &str, f: &dyn Fn(&str) -> Result<String, String>) -> Result<String, String> {
+    match serde_json::from_str::<Value>(body) {
+        Ok(mut v) => {
+            map_strings(&mut v, f)?;
+            serde_json::to_string(&v).map_err(|e| e.to_string())
+        }
+        Err(_) => f(body),
+    }
+}
+
+fn map_strings(v: &mut Value, f: &dyn Fn(&str) -> Result<String, String>) -> Result<(), String> {
+    match v {
+        Value::String(s) => *s = f(s)?,
+        Value::Array(items) => {
+            for item in items {
+                map_strings(item, f)?;
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                map_strings(item, f)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +708,15 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         steps.push(json!({ "command": cmd, "requests": requests }));
     }
 
+    // Every write the recording caused, kept or not: a command replay sends
+    // them all again.
+    let side_effects: Vec<Value> = input
+        .entries
+        .iter()
+        .filter(|e| input.recorder.request_tags.contains_key(&e.request_id))
+        .filter(|e| is_write(&e.method, e.post_data.as_deref()))
+        .map(|e| json!({ "method": e.method, "url": e.url.split('?').next().unwrap_or("") }))
+        .collect();
     if request_ids.is_empty() {
         return Err(format!(
             "no first-party JSON requests were recorded for {}; this flow has nothing to replay over HTTP",
@@ -681,6 +760,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             .map(|r| r["expect"]["itemFields"].clone())
             .unwrap_or(json!([])),
         "provenance": "observed",
+        "sideEffects": side_effects,
         "verifiedAt": Value::Null,
         "steps": steps,
     });
@@ -866,8 +946,13 @@ fn link_requests(
                     let field = path
                         .rsplit(['.', ']'])
                         .next()
-                        .unwrap_or("value")
-                        .to_string();
+                        .map(|f| {
+                            f.chars()
+                                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                                .collect::<String>()
+                        })
+                        .filter(|f| !f.is_empty())
+                        .unwrap_or_else(|| "value".to_string());
                     let name = match links.params.iter().find(|p| p["example"] == value.as_str()) {
                         Some(p) => p["name"].as_str().unwrap_or("").to_string(),
                         None => {
@@ -1212,16 +1297,57 @@ pub fn flow_path(origin: &str, name: &str) -> PathBuf {
     flows_dir().join(origin).join(format!("{}.json", name))
 }
 
+/// Flow files hold recorded URLs and form values, so only the owner can read
+/// them, from the moment they are created.
+#[cfg(unix)]
+fn create_private_dirs(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    for d in [dir, flows_dir().as_path()] {
+        if d.starts_with(flows_dir()) && d.exists() {
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_dirs(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+#[cfg(unix)]
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(text.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    std::fs::write(path, text)
+}
+
 pub fn write_flow(flow: &Value) -> Result<PathBuf, String> {
     let origin = flow["origin"].as_str().ok_or("flow has no origin")?;
     let name = flow["name"].as_str().ok_or("flow has no name")?;
     let path = flow_path(origin, name);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        create_private_dirs(parent)
             .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
     }
     let text = serde_json::to_string_pretty(flow).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text)
+    write_private(&path, &text)
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     Ok(path)
 }
@@ -1417,7 +1543,7 @@ pub fn prepare_all(
                 url: fill(r["url"].as_str().unwrap_or(""), &params, true)?,
                 headers,
                 body: match r["body"].as_str() {
-                    Some(b) => Some(fill(b, &params, false)?),
+                    Some(b) => Some(map_body(b, &|t| fill(t, &params, false))?),
                     None => None,
                 },
                 expect: r["expect"].clone(),
@@ -1433,7 +1559,7 @@ impl PreparedRequest {
         let mut out = self.clone();
         out.url = fill_references(&self.url, bodies, true)?;
         if let Some(b) = &self.body {
-            out.body = Some(fill_references(b, bodies, false)?);
+            out.body = Some(map_body(b, &|t| fill_references(t, bodies, false))?);
         }
         Ok(out)
     }
@@ -1802,6 +1928,17 @@ pub fn replay_commands(
             name, from
         ));
     }
+    if flow["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|s| s["command"]["redacted"] == true)
+    {
+        return Err(
+            "the recording typed a secret, which is not stored, so the commands cannot be replayed"
+                .to_string(),
+        );
+    }
     let opens_page = flow["steps"]
         .as_array()
         .into_iter()
@@ -1814,23 +1951,21 @@ pub fn replay_commands(
         .map(|u| json!({ "action": "navigate", "url": u }));
     Ok(start
         .into_iter()
-        .chain(
-            flow["steps"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|s| {
-                    let mut text = serde_json::to_string(&s["command"]).ok()?;
-                    for (from, to) in &swaps {
-                        text = text.replace(from.as_str(), to);
-                        let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
-                        if ef != *from {
-                            text = text.replace(ef.as_ref(), et.as_ref());
-                        }
+        .chain(flow["steps"].as_array().into_iter().flatten().map(|s| {
+            let mut cmd = s["command"].clone();
+            let _ = map_strings(&mut cmd, &|text| {
+                let mut text = text.to_string();
+                for (from, to) in &swaps {
+                    text = text.replace(from.as_str(), to);
+                    let (ef, et) = (urlencoding::encode(from), urlencoding::encode(to));
+                    if ef != *from {
+                        text = text.replace(ef.as_ref(), et.as_ref());
                     }
-                    serde_json::from_str(&text).ok()
-                }),
-        )
+                }
+                Ok(text)
+            });
+            cmd
+        }))
         .collect())
 }
 
@@ -1941,8 +2076,24 @@ pub fn tiers_for(flow: &Value, id: &str) -> Vec<&'static str> {
     TIERS[preferred..].to_vec()
 }
 
-pub fn http_client() -> Result<reqwest::Client, String> {
+/// The direct-HTTP client. Redirects are followed only to hosts the
+/// session's domain filter allows, the same rule browser requests follow.
+pub fn http_client(
+    filter: Option<super::network::DomainFilter>,
+) -> Result<reqwest::Client, String> {
+    let policy = reqwest::redirect::Policy::custom(move |attempt| {
+        let blocked = filter
+            .as_ref()
+            .and_then(|f| f.check_url(attempt.url().as_str()).err());
+        match blocked {
+            Some(reason) => attempt.error(reason),
+            // reqwest's default redirect limit.
+            None if attempt.previous().len() >= 10 => attempt.stop(),
+            None => attempt.follow(),
+        }
+    });
     reqwest::Client::builder()
+        .redirect(policy)
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
@@ -2649,5 +2800,106 @@ mod tests {
         assert_eq!(out["empty"], true);
         assert_eq!(out["verified"], false);
         assert_eq!(flow["verifiedAt"], "before");
+    }
+
+    #[test]
+    fn params_with_quotes_keep_json_bodies_and_commands_valid() {
+        let flow = json!({
+            "name": "f",
+            "params": [{ "name": "q", "example": "kettle" }],
+            "output": "s1r1",
+            "steps": [
+                { "command": { "action": "fill", "selector": "#q", "value": "kettle" },
+                  "requests": [{ "id": "s1r1", "method": "POST", "url": "https://site.example/api",
+                    "headers": {}, "body": "{\"query\":\"{{q}}\"}", "expect": {} }] },
+            ],
+        });
+        let value = "a \"quoted\" item\\";
+        let reqs = prepare(&flow, &[("q".to_string(), value.to_string())]).unwrap();
+        let body: Value = serde_json::from_str(reqs[0].body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["query"], value);
+        let cmds = replay_commands(&flow, &[("q".to_string(), value.to_string())]).unwrap();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0]["value"], value);
+    }
+
+    #[test]
+    fn secrets_are_not_recorded_and_block_the_replay() {
+        let mut r = FlowRecorder::default();
+        r.start("login", true);
+        r.begin_command(
+            "fill",
+            &json!({ "action": "fill", "selector": "#password", "value": "hunter2" }),
+        );
+        r.begin_command(
+            "auth_login",
+            &json!({ "action": "auth_login", "name": "x" }),
+        );
+        assert_eq!(r.commands.len(), 1);
+        assert_eq!(r.commands[0].1["value"], REDACTED);
+        let flow = json!({
+            "params": [],
+            "startUrl": "https://site.example/",
+            "steps": [{ "command": r.commands[0].1.clone() }],
+        });
+        assert!(replay_commands(&flow, &[]).unwrap_err().contains("secret"));
+    }
+
+    #[test]
+    fn save_lists_every_write_the_recording_caused() {
+        let rec = recorder();
+        let mut buy = entry(
+            "buy",
+            "https://www.example.com.ar/cart?x=1",
+            "XHR",
+            "text/plain",
+            "ok",
+        );
+        buy.method = "POST".to_string();
+        let mut r = rec;
+        r.tag_request("buy");
+        let entries = vec![
+            entry(
+                "api",
+                "https://api.example.com.ar/movies",
+                "Fetch",
+                "application/json",
+                r#"{"movies":[]}"#,
+            ),
+            buy,
+        ];
+        let (flow, _) = build_flow(SaveInput {
+            name: "f",
+            recorder: &r,
+            entries: &entries,
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        assert_eq!(
+            flow["sideEffects"],
+            json!([{ "method": "POST", "url": "https://www.example.com.ar/cart" }])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flow_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("abflow-perm-{}", std::process::id()));
+        let path = dir.join("site.example").join("f.json");
+        create_private_dirs(path.parent().unwrap()).unwrap();
+        write_private(&path, "{}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let dir_mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

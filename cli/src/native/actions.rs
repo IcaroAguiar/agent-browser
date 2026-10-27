@@ -11908,7 +11908,8 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         }
     }
 
-    let client = super::flow::http_client()?;
+    let filter = state.domain_filter.read().await.clone();
+    let client = super::flow::http_client(filter.clone())?;
     let mut results = Vec::new();
     let mut bodies: HashMap<String, Value> = HashMap::new();
     for prepared in &requests {
@@ -11919,6 +11920,11 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                 break;
             }
         };
+        // Saved destinations follow the session's current domain allowlist,
+        // not the one in force when the flow was recorded.
+        if let Some(reason) = filter.as_ref().and_then(|f| f.check_url(&req.url).err()) {
+            return Err(format!("flow '{}' step {}: {}", name, req.step, reason));
+        }
         let mut done = false;
         for tier in super::flow::tiers_for(&flow, &req.id) {
             let result = match tier {
@@ -11939,7 +11945,7 @@ async fn handle_flow_run(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
                     super::flow::run_http(&client, req, cookie.as_deref(), routed).await
                 }
                 "page" => run_flow_in_page(&flow, req, state).await,
-                _ => run_flow_replay(&flow, &params, req, state).await,
+                _ => run_flow_replay(&flow, &params, req, allow_write, state).await,
             };
             let (ok, drift) = (result.ok, result.drift);
             if let Some(body) = result.body.as_ref().filter(|_| ok) {
@@ -12159,9 +12165,25 @@ async fn run_flow_replay(
     flow: &Value,
     params: &[(String, String)],
     req: &super::flow::PreparedRequest,
+    allow_write: bool,
     state: &mut DaemonState,
 ) -> super::flow::TierResult {
     let started = std::time::Instant::now();
+    // A replay repeats every recorded command, so it sends every write the
+    // recording caused, not only the ones the output depends on.
+    if !allow_write {
+        if let Some(w) = flow["sideEffects"].as_array().and_then(|a| a.first()) {
+            return super::flow::replay_unavailable(
+                req,
+                started,
+                format!(
+                    "replaying the recorded commands would also send {} {}; rerun with --allow-write to allow it",
+                    w["method"].as_str().unwrap_or(""),
+                    w["url"].as_str().unwrap_or("")
+                ),
+            );
+        }
+    }
     if let Err(e) = flow_ensure_browser(state).await {
         return super::flow::replay_failed(req, started, e);
     }

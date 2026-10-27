@@ -193,6 +193,20 @@ fn format_webmcp_text(action: Option<&str>, data: &serde_json::Value) -> Option<
     }
 }
 
+/// Quote a value for a POSIX shell. Recorded param values come from the
+/// site, so a suggested command must never let them run as shell syntax.
+pub(crate) fn shell_quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-./:@%+=,".contains(c));
+    if plain {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 /// Saved flows announced after navigating to a site that has them.
 pub(crate) fn format_flow_hint(data: &serde_json::Value) -> Option<String> {
     let flows = data.get("flows")?.as_array()?;
@@ -219,7 +233,12 @@ pub(crate) fn format_flow_hint(data: &serde_json::Value) -> Option<String> {
             .as_object()
             .map(|m| {
                 m.iter()
-                    .map(|(k, v)| format!("--param {}={}", k, v.as_str().unwrap_or("")))
+                    .map(|(k, v)| {
+                        format!(
+                            "--param {}",
+                            shell_quote(&format!("{}={}", k, v.as_str().unwrap_or("")))
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -423,17 +442,42 @@ fn format_observed_flows(data: &serde_json::Value) -> Option<String> {
         vec!["Observed by agent-browser (saved flows, not declared by the page):".to_string()];
     for f in flows {
         let name = f["name"].as_str().unwrap_or("");
+        let props = f["inputSchema"]["properties"].as_object();
+        let inputs: Vec<String> = props
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| {
+                format!(
+                    "{} ({}): {}",
+                    k,
+                    v["type"].as_str().unwrap_or("string"),
+                    v["description"].as_str().unwrap_or("")
+                )
+            })
+            .collect();
+        let example: Vec<String> = props
+            .into_iter()
+            .flatten()
+            .map(|(k, _)| format!("--param {}", shell_quote(&format!("{}=<value>", k))))
+            .collect();
         lines.push(format!(
-            "{} [{}]\n  {}\n  input: {}\n  run: agent-browser flow run {} --param key=value",
+            "{} [{}]\n  {}",
             name,
             if f["verifiedAt"].is_null() {
                 "unverified"
             } else {
                 "verified"
             },
-            f["description"].as_str().unwrap_or(""),
-            serde_json::to_string(&f["inputSchema"]["properties"]).unwrap_or_default(),
-            name
+            f["description"].as_str().unwrap_or("")
+        ));
+        for input in &inputs {
+            lines.push(format!("  input {}", input));
+        }
+        lines.push(format!(
+            "  run: agent-browser flow run {}{}{}",
+            name,
+            if example.is_empty() { "" } else { " " },
+            example.join(" ")
         ));
     }
     Some(lines.join("\n"))
@@ -4934,6 +4978,19 @@ hydration: -  phases: 0  hydratedComponents: 0"
         );
         assert!(rendered.contains("origin=https://example.com"));
         assert!(rendered.contains("\"message\": \"untrusted\""));
+    }
+
+    #[test]
+    fn test_flow_hint_quotes_recorded_values_for_the_shell() {
+        let data = json!({ "flows": [{
+            "name": "search",
+            "examples": { "q": "kettle; rm -rf ~", "id": "401" },
+            "verifiedAt": "now",
+        }] });
+        let hint = super::format_flow_hint(&data).unwrap();
+        assert!(hint.contains("--param 'q=kettle; rm -rf ~'"));
+        assert!(hint.contains("--param id=401"));
+        assert_eq!(super::shell_quote("it's"), "'it'\\''s'");
     }
 
     #[test]
