@@ -334,6 +334,36 @@ fn describe_command(cmd: &Value) -> String {
     }
 }
 
+/// Params the agent passed, plus query values of the start URL that the
+/// recorded API requests sent too (`?q=tea` -> param `q`).
+fn with_page_query_params(
+    start: &str,
+    base: &str,
+    given: &[(String, String)],
+    entries: &[HarEntry],
+) -> Vec<(String, String)> {
+    let mut out = given.to_vec();
+    let Ok(url) = url::Url::parse(start) else {
+        return out;
+    };
+    for (key, value) in url.query_pairs() {
+        let (key, value) = (key.into_owned(), value.into_owned());
+        if value.chars().count() < 3 || out.iter().any(|(k, v)| *k == key || *v == value) {
+            continue;
+        }
+        let encoded = urlencoding::encode(&value).into_owned();
+        let sent = entries.iter().any(|e| {
+            is_api_entry(e, base)
+                && (e.url.contains(&encoded)
+                    || e.post_data.as_deref().is_some_and(|b| b.contains(&value)))
+        });
+        if sent {
+            out.push((key, value));
+        }
+    }
+    out
+}
+
 /// Build the flow file and the save report from what was recorded.
 pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
     let start = start_url(&input.recorder.commands)
@@ -347,6 +377,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         .ok_or("nothing to save: the flow has no `open <url>` command and no page was open")?;
     let host = host_of(&start).ok_or("the flow's start URL has no host")?;
     let base = base_domain(&host);
+    let given = with_page_query_params(&start, &base, input.params, input.entries);
 
     let mut steps = Vec::new();
     let mut gaps = Vec::new();
@@ -398,7 +429,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
                     }
                     continue;
                 }
-                headers.insert(k.clone(), json!(templatize(v, input.params, false)));
+                headers.insert(k.clone(), json!(templatize(v, &given, false)));
             }
             let item_fields = item_fields(&parsed);
             let id = format!("s{}r{}", index + 1, requests.len() + 1);
@@ -410,9 +441,9 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             requests.push(json!({
                 "id": id,
                 "method": e.method,
-                "url": templatize(&e.url, input.params, true),
+                "url": templatize(&e.url, &given, true),
                 "headers": headers,
-                "body": e.post_data.as_deref().map(|b| templatize(b, input.params, false)),
+                "body": e.post_data.as_deref().map(|b| templatize(b, &given, false)),
                 "expect": {
                     "status": e.status,
                     "mime": e.mime_type,
@@ -460,11 +491,16 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
             base
         ));
     }
-    let links = link_requests(&mut steps, &bodies, input.params);
-    let mut params: Vec<Value> = input
-        .params
+    let links = link_requests(&mut steps, &bodies, &given);
+    let mut params: Vec<Value> = given
         .iter()
-        .map(|(k, v)| json!({ "name": k, "example": v }))
+        .map(|(k, v)| {
+            if input.params.iter().any(|(n, _)| n == k) {
+                json!({ "name": k, "example": v })
+            } else {
+                json!({ "name": k, "example": v, "from": { "pageQuery": k } })
+            }
+        })
         .collect();
     params.extend(links.params.iter().cloned());
     let output = match input.output {
@@ -514,7 +550,11 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         "requests": requests_report,
         "output": output,
         "params": params.iter().map(|p| p["name"].clone()).collect::<Vec<_>>(),
-        "detectedParams": links.params,
+        "detectedParams": params
+            .iter()
+            .filter(|p| p.get("from").is_some())
+            .cloned()
+            .collect::<Vec<_>>(),
         "references": links.references,
         "gaps": gaps,
         "droppedHeaders": dropped_headers,
@@ -880,15 +920,38 @@ fn as_text(v: &Value) -> String {
 }
 
 /// The list the response is about: the body itself if it is an array, else
-/// its largest array field.
+/// the heaviest list of objects anywhere in it (GraphQL nests it under `data`).
 fn main_list(body: &Value) -> Option<(Option<String>, &Vec<Value>)> {
     if let Some(items) = body.as_array() {
         return Some((None, items));
     }
-    body.as_object()?
-        .iter()
-        .filter_map(|(k, v)| v.as_array().map(|a| (Some(k.clone()), a)))
-        .max_by_key(|(_, a)| a.len())
+    let mut best: Option<(String, &Vec<Value>)> = None;
+    collect_lists(body, "", &mut best);
+    best.map(|(k, v)| (Some(k), v))
+}
+
+fn collect_lists<'a>(v: &'a Value, path: &str, best: &mut Option<(String, &'a Vec<Value>)>) {
+    let Some(map) = v.as_object() else { return };
+    for (k, child) in map {
+        let here = if path.is_empty() {
+            k.clone()
+        } else {
+            format!("{}.{}", path, k)
+        };
+        match child {
+            Value::Array(items) if items.first().is_some_and(|i| i.is_object()) => {
+                // The heaviest list, not the longest: GraphQL metadata (cache
+                // hints, errors) can have more entries than the data.
+                let weight =
+                    |l: &Vec<Value>| serde_json::to_string(l).map(|t| t.len()).unwrap_or(0);
+                if best.as_ref().is_none_or(|(_, b)| weight(items) > weight(b)) {
+                    *best = Some((here, items));
+                }
+            }
+            Value::Object(_) => collect_lists(child, &here, best),
+            _ => {}
+        }
+    }
 }
 
 /// Field names used in `--where` or `--fields` that no item has.
@@ -2217,5 +2280,58 @@ mod tests {
         assert!(looks_generated("R_kgDOUQ"));
         assert!(!looks_generated("es-AR"));
         assert!(!looks_generated("public"));
+    }
+
+    #[test]
+    fn a_start_url_query_value_the_api_sent_becomes_a_param() {
+        let mut r = FlowRecorder::default();
+        r.start("search", true);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.shop.example/l/?keyword=kettle&page=1" }),
+        );
+        r.tag_request("api");
+        let mut api = entry(
+            "api",
+            "https://www.shop.example/api/v2",
+            "Fetch",
+            "application/json",
+            r#"{"items":[]}"#,
+        );
+        api.method = "POST".to_string();
+        api.post_data =
+            Some(r#"{"query":"query s { x }","variables":{"keyword":"kettle"}}"#.to_string());
+        let (flow, report) = build_flow(SaveInput {
+            name: "search",
+            recorder: &r,
+            entries: &[api],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        assert_eq!(report["params"], json!(["keyword"]));
+        assert!(flow["steps"][0]["requests"][0]["body"]
+            .as_str()
+            .unwrap()
+            .contains("{{keyword}}"));
+    }
+
+    #[test]
+    fn shape_finds_a_list_nested_under_graphql_data() {
+        let body = json!({ "data": { "items": { "results": [
+            { "item": { "title": "A" }, "price": 1 },
+            { "item": { "title": "B" }, "price": 2 },
+        ] } }, "extensions": { "hints": [{ "a": 1 }, { "a": 2 }, { "a": 3 }] } });
+        let shape = Shape {
+            filters: vec![],
+            fields: vec!["item.title".to_string()],
+            limit: Some(1),
+        };
+        assert!(unknown_fields(&body, &shape).is_empty());
+        let out = apply_shape(body, &shape);
+        assert_eq!(out["list"], "data.items.results");
+        assert_eq!(out["items"], json!([{ "item.title": "A" }]));
     }
 }
