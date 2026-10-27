@@ -202,10 +202,42 @@ fn signature_type(sig: &Value) -> &str {
 /// Every key the recording saw must still be there with the same type. New
 /// keys are fine; a missing or retyped key means the contract moved.
 pub fn signature_matches(recorded: &Value, current: &Value) -> Result<(), String> {
-    matches_at(recorded, current, "")
+    matches_at(recorded, current, "", false)
 }
 
-fn matches_at(recorded: &Value, current: &Value, path: &str) -> Result<(), String> {
+/// Like `signature_matches`, but a recorded list, and any count, may be
+/// missing: many APIs drop an empty list and its totals instead of sending `[]`.
+fn matches_without_lists(recorded: &Value, current: &Value) -> bool {
+    matches_at(recorded, current, "", true).is_ok()
+}
+
+/// Paths of lists in `current` that the recording did not have.
+fn new_lists(recorded: &Value, current: &Value, path: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(cur) = current.get("object").and_then(|v| v.as_object()) {
+        let rec = recorded.get("object").and_then(|v| v.as_object());
+        for (key, sig) in cur {
+            let child = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{}.{}", path, key)
+            };
+            match rec.and_then(|r| r.get(key)) {
+                None if signature_type(sig) == "array" => out.push(child),
+                None => {}
+                Some(rec_sig) => out.extend(new_lists(rec_sig, sig, &child)),
+            }
+        }
+    }
+    out
+}
+
+fn matches_at(
+    recorded: &Value,
+    current: &Value,
+    path: &str,
+    lists_optional: bool,
+) -> Result<(), String> {
     let (rec_ty, cur_ty) = (signature_type(recorded), signature_type(current));
     if rec_ty == "null" || cur_ty == "null" {
         return Ok(());
@@ -229,14 +261,16 @@ fn matches_at(recorded: &Value, current: &Value, path: &str) -> Result<(), Strin
                 format!("{}.{}", path, key)
             };
             match cur.get(key) {
+                // Counts and totals often go with the list.
+                None if lists_optional && matches!(signature_type(sig), "array" | "number") => {}
                 None => return Err(format!("key '{}' is missing", child)),
-                Some(cur_sig) => matches_at(sig, cur_sig, &child)?,
+                Some(cur_sig) => matches_at(sig, cur_sig, &child, lists_optional)?,
             }
         }
     }
     if let (Some(rec), Some(cur)) = (recorded.get("array"), current.get("array")) {
         if !rec.is_null() && !cur.is_null() {
-            matches_at(rec, cur, &format!("{}[]", path))?;
+            matches_at(rec, cur, &format!("{}[]", path), lists_optional)?;
         }
     }
     Ok(())
@@ -1402,6 +1436,9 @@ pub struct TierResult {
     pub drift: bool,
     /// The response came back with a different shape than the recording.
     pub shape_changed: bool,
+    /// The response matches the recording except that its lists are absent,
+    /// which is how many APIs answer a query with no results.
+    pub empty: bool,
     pub tier: &'static str,
 }
 
@@ -1417,11 +1454,13 @@ impl TierResult {
             ms,
             drift: f.drift,
             shape_changed: f.shape_changed,
+            empty: false,
             tier,
         }
     }
 }
 
+#[derive(Debug)]
 pub struct Failure {
     pub status: Option<u16>,
     pub reason: String,
@@ -1459,7 +1498,11 @@ fn looks_like_challenge(body: &str) -> bool {
 
 /// Judge a response the same way on every tier: blocked, rejected input,
 /// changed shape, or data.
-pub fn check_response(req: &PreparedRequest, status: u16, text: &str) -> Result<Value, Failure> {
+pub fn check_response(
+    req: &PreparedRequest,
+    status: u16,
+    text: &str,
+) -> Result<(Value, bool), Failure> {
     if matches!(status, 401 | 403 | 407 | 429) {
         return Err(Failure::new(true, Some(status), format!("HTTP {}", status)));
     }
@@ -1479,7 +1522,15 @@ pub fn check_response(req: &PreparedRequest, status: u16, text: &str) -> Result<
     }
     let parsed: Value = serde_json::from_str(text)
         .map_err(|_| Failure::new(true, Some(status), "response is not JSON".to_string()))?;
-    if let Err(reason) = signature_matches(&req.expect["signature"], &signature(&parsed)) {
+    let current = signature(&parsed);
+    if let Err(reason) = signature_matches(&req.expect["signature"], &current) {
+        // A list that only went missing reads as no results; a list that
+        // appeared under a new name means the contract moved.
+        if matches_without_lists(&req.expect["signature"], &current)
+            && new_lists(&req.expect["signature"], &current, "").is_empty()
+        {
+            return Ok((parsed, true));
+        }
         return Err(Failure {
             status: Some(status),
             reason: format!("response shape changed: {}", reason),
@@ -1487,7 +1538,7 @@ pub fn check_response(req: &PreparedRequest, status: u16, text: &str) -> Result<
             shape_changed: true,
         });
     }
-    Ok(parsed)
+    Ok((parsed, false))
 }
 
 pub fn tier_result(
@@ -1512,7 +1563,7 @@ pub fn tier_result(
     let checked = outcome
         .and_then(|(status, text)| check_response(req, status, &text).map(|body| (status, body)));
     match checked {
-        Ok((status, body)) => TierResult {
+        Ok((status, (body, empty))) => TierResult {
             id: req.id.clone(),
             step: req.step,
             ok: true,
@@ -1522,6 +1573,7 @@ pub fn tier_result(
             ms,
             drift: false,
             shape_changed: false,
+            empty,
             tier,
         },
         Err(f) => TierResult::failed(req, tier, ms, f),
@@ -1884,7 +1936,11 @@ pub fn finish_run(
     }
     let all_ok = !last.is_empty() && last.iter().all(|r| r.ok);
     let shape_changed = attempts.iter().find(|a| a.shape_changed);
-    if all_ok && shape_changed.is_none() {
+    // An empty answer cannot confirm the recorded lists still exist, so it
+    // leaves the verified state as it was.
+    let empty = last.iter().any(|r| r.ok && r.empty);
+    if all_ok && shape_changed.is_none() && empty {
+    } else if all_ok && shape_changed.is_none() {
         flow["verifiedAt"] = json!(now);
     } else if shape_changed.is_some() || (!all_ok && attempts.iter().any(|r| !r.ok && r.drift)) {
         flow["verifiedAt"] = Value::Null;
@@ -1912,7 +1968,13 @@ pub fn finish_run(
         .iter()
         .find(|r| r.id == output_id && r.ok)
         .and_then(|r| r.body.clone())
-        .map(|b| apply_shape(b, shape));
+        .map(|b| {
+            if empty {
+                json!({ "total": 0, "matched": 0, "items": [] })
+            } else {
+                apply_shape(b, shape)
+            }
+        });
     let steps: Vec<Value> = last
         .iter()
         .map(|r| {
@@ -1939,11 +2001,14 @@ pub fn finish_run(
         "name": flow["name"],
         "origin": flow["origin"],
         "ok": all_ok,
-        "verified": all_ok && shape_changed.is_none(),
+        "verified": all_ok && shape_changed.is_none() && !empty,
         "ms": total_ms,
         "steps": steps,
         "data": output,
     });
+    if empty {
+        response["empty"] = json!(true);
+    }
     if let Some(a) = shape_changed {
         response["drift"] = json!({ "tier": a.tier, "step": a.step, "reason": a.reason });
     }
@@ -2498,5 +2563,33 @@ mod tests {
         assert!(
             extract_embedded("<html></html>", &json!({ "scriptId": "__NEXT_DATA__" })).is_none()
         );
+    }
+
+    #[test]
+    fn a_response_without_its_lists_is_empty_not_drift() {
+        let req = PreparedRequest {
+            expect: json!({ "signature": signature(&json!({ "payload": { "results": [{ "id": 1 }], "total": 1 } })) }),
+            ..prepared("s1r1")
+        };
+        let (_, empty) = check_response(&req, 200, r#"{"payload":{}}"#).unwrap();
+        assert!(empty);
+        let moved = check_response(&req, 200, r#"{"payload":{"items":[]}}"#).unwrap_err();
+        assert!(moved.shape_changed);
+
+        let mut flow = json!({
+            "name": "f", "origin": "site.example", "output": "s1r1", "verifiedAt": "before",
+            "steps": [{ "requests": [{ "id": "s1r1" }] }],
+        });
+        let attempts = vec![tier_result(
+            &req,
+            "http",
+            Instant::now(),
+            Ok((200, r#"{"payload":{"total":0}}"#.to_string())),
+        )];
+        let out = finish_run(&mut flow, &attempts, "now", 1, &Shape::default());
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["empty"], true);
+        assert_eq!(out["verified"], false);
+        assert_eq!(flow["verifiedAt"], "before");
     }
 }

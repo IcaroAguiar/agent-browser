@@ -356,6 +356,9 @@ pub(crate) fn format_flow_text(action: Option<&str>, data: &serde_json::Value) -
                     d["reason"].as_str().unwrap_or("response changed"),
                     d["tier"].as_str().unwrap_or("-")
                 ),
+                None if data.get("empty") == Some(&serde_json::Value::Bool(true)) => {
+                    "no results, so the flow's verified state is unchanged".to_string()
+                }
                 None => "verified".to_string(),
             };
             Some(format!(
