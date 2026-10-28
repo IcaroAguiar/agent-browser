@@ -4801,6 +4801,50 @@ mod tests {
         assert!(config.allows(TOOL_REACT_TREE));
     }
 
+    /// Every tool with its startup profiles, in the shape `tools/list` returns, for clients that ship the catalog.
+    fn tool_catalog() -> Value {
+        let profiles = [
+            ToolProfile::Core,
+            ToolProfile::Network,
+            ToolProfile::State,
+            ToolProfile::Debug,
+            ToolProfile::Tabs,
+            ToolProfile::React,
+            ToolProfile::Mobile,
+            ToolProfile::Webmcp,
+        ];
+        let mut tools = tools();
+        tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        for tool in &mut tools {
+            let name = tool["name"].as_str().unwrap_or_default().to_string();
+            tool["profiles"] = json!(profiles
+                .iter()
+                .filter(|profile| profile.tools().contains(&name.as_str()))
+                .map(|profile| profile.name())
+                .collect::<Vec<_>>());
+        }
+        json!({ "protocolVersion": PROTOCOL_VERSION, "tools": tools })
+    }
+
+    #[test]
+    fn mcp_tool_catalog_snapshot_is_current() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../packages/@agent-browser/sandbox/mcp-tools.json");
+        let expected = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&tool_catalog()).unwrap()
+        );
+        if std::env::var_os("AGENT_BROWSER_UPDATE_MCP_TOOLS").is_some() {
+            std::fs::write(&path, &expected).unwrap();
+        }
+        let actual = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            actual == expected,
+            "{} is out of date. Run `pnpm mcp-tools:sync`.",
+            path.display()
+        );
+    }
+
     #[test]
     fn parse_mcp_call_defaults_to_every_tool() {
         let (name, arguments, config) =
