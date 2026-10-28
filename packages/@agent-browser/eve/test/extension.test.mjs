@@ -39,8 +39,8 @@ function fakeSandbox({ respond } = {}) {
     commands,
     async run({ command }) {
       commands.push(command);
-      if (command.startsWith("command -v ")) {
-        return { exitCode: 0, stdout: "", stderr: "" };
+      if (command.endsWith(" --version 2>/dev/null")) {
+        return { exitCode: 0, stdout: `agent-browser ${AGENT_BROWSER_SANDBOX_VERSION}\n`, stderr: "" };
       }
       const result = respond?.(command);
       return { exitCode: 0, stdout: OK({}), stderr: "", ...result };
@@ -128,8 +128,25 @@ test("auto-installs when the binary is missing", async () => {
   const sandbox = {
     async run({ command }) {
       commands.push(command);
-      if (command.startsWith("command -v ")) {
-        return { exitCode: 1, stdout: "", stderr: "" };
+      if (command.endsWith(" --version 2>/dev/null")) {
+        return { exitCode: 127, stdout: "", stderr: "" };
+      }
+      return { exitCode: 0, stdout: OK({}), stderr: "" };
+    },
+  };
+  await tools.close.execute({}, fakeCtx(sandbox));
+  assert.ok(commands.some((command) => command.includes("npm install -g agent-browser@")));
+  resetConfig();
+});
+
+test("reinstalls when the sandbox has another agent-browser minor", async () => {
+  resetConfig({ installSystemDependencies: false });
+  const commands = [];
+  const sandbox = {
+    async run({ command }) {
+      commands.push(command);
+      if (command.endsWith(" --version 2>/dev/null")) {
+        return { exitCode: 0, stdout: "agent-browser 0.1.0\n", stderr: "" };
       }
       return { exitCode: 0, stdout: OK({}), stderr: "" };
     },
@@ -143,7 +160,7 @@ test("skips the install probe when autoInstall is false", async () => {
   resetConfig({ autoInstall: false });
   const sandbox = fakeSandbox();
   await tools.close.execute({}, fakeCtx(sandbox));
-  assert.ok(!sandbox.commands.some((command) => command.startsWith("command -v ")));
+  assert.ok(!sandbox.commands.some((command) => command.endsWith(" --version 2>/dev/null")));
   resetConfig();
 });
 
@@ -228,6 +245,23 @@ test("fails loudly when the sandbox runs another agent-browser minor", async () 
   await assert.rejects(
     () => tools.close.execute({}, fakeCtx(sandbox)),
     /agent-browser 9\.9\.0 in the sandbox does not match @agent-browser\/eve/,
+  );
+});
+
+test("shows the install hint when another minor rejects the call", async () => {
+  resetConfig();
+  const sandbox = fakeSandbox({
+    respond: () => ({
+      exitCode: 2,
+      stdout: JSON.stringify({
+        _meta: { agentBrowserVersion: "9.9.0" },
+        error: { code: -32602, message: "Unknown tool: agent_browser_close" },
+      }),
+    }),
+  });
+  await assert.rejects(
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /agent-browser 9\.9\.0 in the sandbox does not match[\s\S]*Install agent-browser@/,
   );
 });
 
