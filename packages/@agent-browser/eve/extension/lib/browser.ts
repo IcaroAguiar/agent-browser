@@ -87,10 +87,10 @@ export async function runMcpTool<TData = unknown>(
       }`,
     );
   }
+  assertMatchingVersion(result._meta?.agentBrowserVersion);
   if (result.error !== undefined) {
     throw new Error(`agent-browser ${tool} failed: ${result.error.message}`);
   }
-  assertMatchingVersion(result._meta?.agentBrowserVersion);
   if (result.isError === true) {
     const text = result.content?.find((part) => part.type === "text")?.text ?? "unknown error";
     throw new Error(`agent-browser ${tool} failed: ${text}`);
@@ -100,12 +100,16 @@ export async function runMcpTool<TData = unknown>(
 
 /** The catalog this package ships describes one agent-browser minor; another minor may take different arguments. */
 function assertMatchingVersion(installed: string | undefined): void {
-  const minor = (version: string) => version.split(".").slice(0, 2).join(".");
-  if (installed !== undefined && minor(installed) !== minor(AGENT_BROWSER_SANDBOX_VERSION)) {
+  if (installed !== undefined && !matchesPackageMinor(installed)) {
     throw new Error(
       `agent-browser ${installed} in the sandbox does not match @agent-browser/eve ${AGENT_BROWSER_SANDBOX_VERSION}. Install agent-browser@${AGENT_BROWSER_SANDBOX_VERSION} or set installSpec to it.`,
     );
   }
+}
+
+function matchesPackageMinor(version: string): boolean {
+  const minor = (v: string) => v.split(".").slice(0, 2).join(".");
+  return minor(version) === minor(AGENT_BROWSER_SANDBOX_VERSION);
 }
 
 /** Server-level settings that MCP tool arguments cannot carry. */
@@ -133,20 +137,22 @@ async function requireSandbox(ctx: BrowserToolContext): Promise<EveSandboxSessio
 async function ensureInstalled(sandbox: EveSandboxSession, abortSignal?: AbortSignal): Promise<void> {
   // eve sandbox sessions have no stable identity to cache by, so probe on every call.
   if (extension.config.autoInstall) {
-    await installIfMissing(sandbox, abortSignal);
+    await installIfMissingOrStale(sandbox, abortSignal);
   }
 }
 
-async function installIfMissing(sandbox: EveSandboxSession, abortSignal?: AbortSignal): Promise<void> {
+async function installIfMissingOrStale(sandbox: EveSandboxSession, abortSignal?: AbortSignal): Promise<void> {
   const config = extension.config;
   const probe = await withDeadline(
     sandbox.run({
       abortSignal,
-      command: `command -v ${quoteShellArg(config.binary)} >/dev/null 2>&1`,
+      command: `${quoteShellArg(config.binary)} --version 2>/dev/null`,
     }),
     "The browser install probe",
   );
-  if ((probe.exitCode ?? 0) === 0) {
+  // An older CLI already in the sandbox gets replaced, not kept.
+  const installed = (probe.stdout ?? "").trim().split(/\s+/).at(-1) ?? "";
+  if ((probe.exitCode ?? 0) === 0 && matchesPackageMinor(installed)) {
     return;
   }
   await withDeadline(
