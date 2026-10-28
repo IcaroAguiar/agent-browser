@@ -17,9 +17,14 @@
 
 - **`@agent-browser/eve` runs each tool as its own short-lived process**, so no `agent-browser` process outlives a tool call. The 28 `core` tools are listed to the model and the other 14 are deferred, found with `eve__search`, which keeps the listed tool context at its previous size (#2241)
 
+### Bug Fixes
+
+- **MCP tool arguments can no longer set global flags.** The CLI reads global flags anywhere in its arguments, so a value such as a selector or `extraArgs` entry could carry its own `--allowed-domains` and override the server or caller allowlist. Tool calls that try are now rejected (#2238)
+
 ### Contributors
 
 - @Railly
+- @lahfir
 
 <!-- release:end -->
 
