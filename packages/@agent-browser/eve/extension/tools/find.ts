@@ -1,3 +1,4 @@
 import { catalogTool } from "../lib/catalog";
 
-export default catalogTool("find");
+// Outside the `core` profile: found with eve__search instead of listed every turn.
+export default catalogTool("find", { deferred: true });

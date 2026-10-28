@@ -7,11 +7,16 @@ import { runMcpTool, type BrowserToolContext } from "./browser";
 
 const PREFIX = "agent_browser_";
 
-/** Catalog arguments the extension sets from its config; the model never sees them. */
+/**
+ * Catalog arguments the model never sees: the ones the extension sets from its
+ * config, and `extraArgs`, the raw CLI flag escape hatch, which repeats a long
+ * description on every tool.
+ */
 const APP_OWNED_ARGUMENTS = new Set([
   "allowedDomains",
   "caCert",
   "clearCaCert",
+  "extraArgs",
   "idleTimeout",
   "namespace",
   "restore",
@@ -42,6 +47,8 @@ const TOOLS = new Map(
 );
 
 export interface CatalogToolOptions<TOutput> {
+  /** Keep the tool out of the model's tool list; the model finds it with `eve__search`. */
+  readonly deferred?: boolean;
   /** Retry once after a transient CDP race, such as a snapshot taken mid-navigation. */
   readonly retryOnCdpError?: boolean;
   /** Shapes the `data` payload of the CLI response into the tool output. */
@@ -76,6 +83,7 @@ export function catalogTool<TOutput = unknown>(name: string, options: CatalogToo
       }
       return (options.output ? await options.output(data, ctx) : data) as TOutput;
     },
+    ...(options.deferred ? { deferred: true } : {}),
     ...(options.toModelOutput ? { toModelOutput: options.toModelOutput } : {}),
   });
 }

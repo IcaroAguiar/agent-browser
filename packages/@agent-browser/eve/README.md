@@ -79,31 +79,33 @@ export default browser({
 
 ## Tools
 
+The 28 tools in the CLI's `core` MCP profile are listed to the model every turn. The other 14, marked *deferred*, stay out of the list and the model finds them with `eve__search`, so they add no context until used.
+
 | Tool | Purpose |
 | --- | --- |
 | `back` | Back |
 | `check` | Check element |
 | `click` | Click element |
 | `close` | Close browser |
-| `console` | Console logs |
-| `dblclick` | Double-click element |
-| `drag` | Drag and drop |
-| `errors` | Page errors |
+| `console` | Console logs (deferred) |
+| `dblclick` | Double-click element (deferred) |
+| `drag` | Drag and drop (deferred) |
+| `errors` | Page errors (deferred) |
 | `eval` | Evaluate JavaScript |
 | `fill` | Fill input |
-| `find` | Find element |
+| `find` | Find element (deferred) |
 | `forward` | Forward |
-| `get_attr` | Get attribute |
-| `get_box` | Get box |
-| `get_count` | Get count |
-| `get_html` | Get HTML |
-| `get_styles` | Get styles |
+| `get_attr` | Get attribute (deferred) |
+| `get_box` | Get box (deferred) |
+| `get_count` | Get count (deferred) |
+| `get_html` | Get HTML (deferred) |
+| `get_styles` | Get styles (deferred) |
 | `get_text` | Get text |
 | `get_title` | Get title |
 | `get_url` | Get URL |
-| `get_value` | Get value |
-| `hover` | Hover element |
-| `network_requests` | Network requests |
+| `get_value` | Get value (deferred) |
+| `hover` | Hover element (deferred) |
+| `network_requests` | Network requests (deferred) |
 | `open` | Open page |
 | `press` | Press key |
 | `read` | Read URL |
@@ -118,7 +120,7 @@ export default browser({
 | `tab_switch` | Tab switch |
 | `type` | Type text |
 | `uncheck` | Uncheck element |
-| `upload` | Upload files |
+| `upload` | Upload files (deferred) |
 | `wait_for_load` | Wait for load state |
 | `wait_for_selector` | Wait for selector |
 | `wait_for_text` | Wait for text |

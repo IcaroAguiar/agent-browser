@@ -75,12 +75,20 @@ test("ships one tool file per catalog tool it exposes", () => {
   }
 });
 
+test("lists core-profile tools and defers the rest", () => {
+  for (const tool of catalog.tools) {
+    const name = tool.name.replace(/^agent_browser_/, "");
+    if (!(name in tools)) continue;
+    assert.equal(tools[name].deferred === true, !tool.profiles.includes("core"), name);
+  }
+});
+
 test("takes descriptions and schemas from the catalog, minus app-owned arguments", () => {
   const source = catalog.tools.find((tool) => tool.name === "agent_browser_click");
   assert.equal(tools.click.description, source.description);
   const properties = Object.keys(tools.click.inputSchema.properties);
   assert.ok(properties.includes("selector"));
-  for (const hidden of ["session", "allowedDomains", "caCert", "namespace", "restore"]) {
+  for (const hidden of ["session", "allowedDomains", "caCert", "namespace", "restore", "extraArgs"]) {
     assert.ok(!properties.includes(hidden), `${hidden} reached the model`);
   }
 });
