@@ -21,6 +21,9 @@ pub struct FlowRecorder {
     pub request_tags: HashMap<String, u64>,
     pub current_seq: Option<u64>,
     pub started_har: bool,
+    /// Values typed into secret fields, kept in memory only, so save can
+    /// drop any captured request that carries one.
+    pub secrets: Vec<String>,
     /// The tab's URL when recording began, for flows that start on an open page.
     pub page_url: Option<String>,
     next_seq: u64,
@@ -35,6 +38,7 @@ impl FlowRecorder {
         *self = FlowRecorder {
             name: Some(name.to_string()),
             started_har,
+            secrets: Vec::new(),
             page_url: None,
             ..FlowRecorder::default()
         };
@@ -49,7 +53,9 @@ impl FlowRecorder {
         if let Some(obj) = recorded.as_object_mut() {
             obj.remove("id");
         }
-        redact_secret(&mut recorded);
+        if let Some(secret) = redact_secret(&mut recorded) {
+            self.secrets.push(secret);
+        }
         self.commands.push((self.next_seq, recorded));
         self.current_seq = Some(self.next_seq);
     }
@@ -63,13 +69,12 @@ impl FlowRecorder {
 
 /// A value typed into a field that looks like a password or code is never
 /// stored; the flow keeps a marker and cannot be replayed through the UI.
-fn redact_secret(cmd: &mut Value) {
-    let Some(obj) = cmd.as_object_mut() else {
-        return;
-    };
-    if obj.get("value").is_none() {
-        return;
-    }
+/// Returns the removed value. `fill` stores input in `value`, `type` in `text`.
+fn redact_secret(cmd: &mut Value) -> Option<String> {
+    let obj = cmd.as_object_mut()?;
+    let field = ["value", "text"]
+        .into_iter()
+        .find(|k| obj.get(*k).and_then(|v| v.as_str()).is_some())?;
     let target = ["selector", "name", "label", "placeholder"]
         .iter()
         .filter_map(|k| obj.get(*k).and_then(|v| v.as_str()))
@@ -88,10 +93,13 @@ fn redact_secret(cmd: &mut Value) {
     ]
     .iter()
     .any(|m| target.contains(m));
-    if secret {
-        obj.insert("value".to_string(), json!(REDACTED));
-        obj.insert("redacted".to_string(), json!(true));
+    if !secret {
+        return None;
     }
+    let original = obj.get(field)?.as_str()?.to_string();
+    obj.insert(field.to_string(), json!(REDACTED));
+    obj.insert("redacted".to_string(), json!(true));
+    (!original.is_empty()).then_some(original)
 }
 
 pub const REDACTED: &str = "<redacted>";
@@ -438,6 +446,22 @@ fn describe_command(cmd: &Value) -> String {
     }
 }
 
+fn carries_secret(e: &HarEntry, secrets: &[String]) -> bool {
+    secrets.iter().any(|secret| {
+        let encoded = urlencoding::encode(secret);
+        let escaped = serde_json::to_string(secret).unwrap_or_default();
+        let escaped = escaped.trim_matches('"');
+        let found = |text: &str| {
+            text.contains(secret.as_str())
+                || text.contains(encoded.as_ref())
+                || text.contains(escaped)
+        };
+        found(&e.url)
+            || e.post_data.as_deref().is_some_and(found)
+            || e.request_headers.iter().any(|(_, v)| found(v))
+    })
+}
+
 /// Data a recorded request can answer with: the JSON body of an API call,
 /// or each JSON block embedded in a first-party HTML document (Next.js
 /// `__NEXT_DATA__`, JSON-LD, framework state), for sites that render on the
@@ -612,6 +636,7 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
     let mut dropped_headers: Vec<String> = Vec::new();
     let mut request_ids: Vec<String> = Vec::new();
     let mut bodies: Vec<(String, Value)> = Vec::new();
+    let mut secret_requests: Vec<String> = Vec::new();
     let mut har_ids: HashMap<String, String> = HashMap::new();
 
     for (index, (seq, cmd)) in input.recorder.commands.iter().enumerate() {
@@ -623,6 +648,17 @@ pub fn build_flow(input: SaveInput<'_>) -> Result<(Value, Value), String> {
         let mut requests = Vec::new();
         let mut seen = Vec::new();
         for (e, parsed, extract) in candidates(&tagged, &base) {
+            if carries_secret(e, &input.recorder.secrets) {
+                if !secret_requests.contains(&e.request_id) {
+                    secret_requests.push(e.request_id.clone());
+                    gaps.push(json!({
+                        "step": index + 1,
+                        "command": describe_command(cmd),
+                        "reason": "a request sent a value typed into a secret field, so it was not saved",
+                    }));
+                }
+                continue;
+            }
             let key = format!(
                 "{} {} {} {}",
                 e.method,
@@ -2901,5 +2937,55 @@ mod tests {
             & 0o777;
         assert_eq!(dir_mode, 0o700);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn typed_secrets_are_redacted_and_their_requests_dropped() {
+        let mut r = FlowRecorder::default();
+        r.start("login", true);
+        r.begin_command(
+            "navigate",
+            &json!({ "action": "navigate", "url": "https://www.example.com.ar/login" }),
+        );
+        r.begin_command(
+            "type",
+            &json!({ "action": "type", "selector": "#password", "text": "hunter2" }),
+        );
+        assert_eq!(r.commands[1].1["text"], REDACTED);
+        r.tag_request("login");
+        r.tag_request("me");
+        let mut login = entry(
+            "login",
+            "https://api.example.com.ar/login",
+            "Fetch",
+            "application/json",
+            r#"{"ok":true}"#,
+        );
+        login.method = "POST".to_string();
+        login.post_data = Some(r#"{"user":"a","password":"hunter2"}"#.to_string());
+        let me = entry(
+            "me",
+            "https://api.example.com.ar/me",
+            "Fetch",
+            "application/json",
+            r#"{"name":"a"}"#,
+        );
+        let (flow, report) = build_flow(SaveInput {
+            name: "login",
+            recorder: &r,
+            entries: &[login, me],
+            params: &[],
+            output: None,
+            created_at: String::new(),
+            login_wall: false,
+        })
+        .unwrap();
+        let text = serde_json::to_string(&flow).unwrap();
+        assert!(!text.contains("hunter2"));
+        assert!(report["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["reason"].as_str().unwrap().contains("secret")));
     }
 }
