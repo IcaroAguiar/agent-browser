@@ -3,6 +3,25 @@ title: "Changelog"
 navTitle: "Changelog"
 ---
 
+## v0.41.0
+
+<p className="text-[#888] text-sm">October 28, 2026</p>
+
+### Breaking Changes
+
+- **`@agent-browser/eve` tools now come from the MCP tool catalog.** The extension exposes the CLI's MCP tools instead of 21 hand-written ones, so tool names and inputs change: `navigate` is `open`, `evaluate` is `eval`, `press_key` is `press`, `select_option` is `select`, `set_checked` is `check` and `uncheck`, `get` is `get_text`, `get_url` and the other `get_*` tools, `tabs` is the `tab_*` tools, and `wait_for` is the `wait_*` tools. The same names apply to `@agent-browser/eve/tools` overrides. The sandbox needs agent-browser 0.41, which the extension installs by default (#2241)
+
+### New Features
+
+- Added **`agent-browser mcp call <tool> '<json>'`** to run one MCP tool without a stdio session and print its result as JSON with the agent-browser version, for runtimes that cannot keep a process open between tool calls (#2238)
+- Added **`@agent-browser/sandbox/mcp-tools.json`**, every MCP tool with its title, description, input schema, annotations and profiles, generated from the CLI and checked by a test (#2240)
+
+### Improvements
+
+- **`@agent-browser/eve` runs each tool as its own short-lived process**, so no `agent-browser` process outlives a tool call. The 28 `core` tools are listed to the model and the other 14 are deferred, found with `eve__search`, which keeps the listed tool context at its previous size (#2241)
+
+---
+
 ## v0.40.0
 
 <p className="text-[#888] text-sm">October 27, 2026</p>
