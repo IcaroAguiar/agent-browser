@@ -47,6 +47,8 @@ const TOOLS = new Map(
 );
 
 export interface CatalogToolOptions<TOutput> {
+  /** Catalog arguments of this tool the model may not set, on top of the shared app-owned ones. */
+  readonly hiddenArguments?: readonly string[];
   /** Keep the tool out of the model's tool list; the model finds it with `eve__search`. */
   readonly deferred?: boolean;
   /** Retry once after a transient CDP race, such as a snapshot taken mid-navigation. */
@@ -63,12 +65,13 @@ export function catalogTool<TOutput = unknown>(name: string, options: CatalogToo
   if (tool === undefined) {
     throw new Error(`agent-browser ${AGENT_BROWSER_SANDBOX_VERSION} has no MCP tool named ${PREFIX}${name}.`);
   }
+  const hidden = new Set([...APP_OWNED_ARGUMENTS, ...(options.hiddenArguments ?? [])]);
   return defineTool({
     description: tool.description,
-    inputSchema: modelSchema(tool.inputSchema),
+    inputSchema: modelSchema(tool.inputSchema, hidden),
     async execute(input: Record<string, unknown>, ctx) {
       const modelArguments = Object.fromEntries(
-        Object.entries(input).filter(([key]) => !APP_OWNED_ARGUMENTS.has(key)),
+        Object.entries(input).filter(([key]) => !hidden.has(key)),
       );
       const args = { ...modelArguments, ...appArguments() };
       let data: unknown;
@@ -88,11 +91,11 @@ export function catalogTool<TOutput = unknown>(name: string, options: CatalogToo
   });
 }
 
-function modelSchema(schema: CatalogTool["inputSchema"]): JsonObject {
+function modelSchema(schema: CatalogTool["inputSchema"], hidden: ReadonlySet<string>): JsonObject {
   const properties = Object.fromEntries(
-    Object.entries(schema.properties ?? {}).filter(([key]) => !APP_OWNED_ARGUMENTS.has(key)),
+    Object.entries(schema.properties ?? {}).filter(([key]) => !hidden.has(key)),
   );
-  const required = (schema.required ?? []).filter((key) => !APP_OWNED_ARGUMENTS.has(key));
+  const required = (schema.required ?? []).filter((key) => !hidden.has(key));
   return { ...schema, properties, required };
 }
 

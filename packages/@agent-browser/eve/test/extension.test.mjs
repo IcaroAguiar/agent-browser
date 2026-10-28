@@ -75,6 +75,23 @@ test("ships one tool file per catalog tool it exposes", () => {
   }
 });
 
+test("close cannot reach other sessions", async () => {
+  assert.ok(!("all" in tools.close.inputSchema.properties));
+  resetConfig();
+  const sandbox = fakeSandbox();
+  await tools.close.execute({ all: true }, fakeCtx(sandbox));
+  assert.equal(parseCall(sandbox.commands.at(-1)).args.all, undefined);
+});
+
+test("instructions name only tools the extension ships", async () => {
+  const { readFileSync } = await import("node:fs");
+  const text = readFileSync(new URL("../extension/instructions.md", import.meta.url), "utf8");
+  for (const [, name] of text.matchAll(/`([a-z_]+)`/g)) {
+    if (name === "networkidle" || name === "eve__search" || name.endsWith("_")) continue;
+    assert.ok(name in tools, `instructions mention missing tool ${name}`);
+  }
+});
+
 test("lists core-profile tools and defers the rest", () => {
   for (const tool of catalog.tools) {
     const name = tool.name.replace(/^agent_browser_/, "");
