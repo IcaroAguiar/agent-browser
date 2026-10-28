@@ -531,7 +531,13 @@ pub fn run_mcp_call(args: &[String]) -> i32 {
             let failed = result["isError"].as_bool().unwrap_or(false);
             (result, if failed { 1 } else { 0 })
         }
-        Err((code, message)) => (json!({ "error": { "code": code, "message": message } }), 2),
+        Err((code, message)) => (
+            json!({
+                "error": { "code": code, "message": message },
+                "_meta": { "agentBrowserVersion": env!("CARGO_PKG_VERSION") },
+            }),
+            2,
+        ),
     };
     if write_json_line(&mut stdout, &value).is_err() {
         return 2;
@@ -2595,27 +2601,50 @@ const MCP_EXTRA_ARGS_GLOBALS: &[&str] = &[
     "--screenshot-format",
 ];
 
+/// Global flags that tools set from their own typed arguments (screenshot's
+/// screenshotDir, doctor's fix, chat's model).
+const MCP_TOOL_GLOBALS: &[&str] = &["--screenshot-dir", "--fix", "--model"];
+
 fn cli_tool_args(
     arguments: &Value,
     command_args: Vec<String>,
     session: Option<&str>,
 ) -> Result<Vec<String>, ProtocolError> {
     let extra_args = optional_string_array(arguments, "extraArgs")?.unwrap_or_default();
-    for token in &extra_args {
-        let name = token.split('=').next().unwrap_or(token);
-        let global = crate::flags::clean_args(&[name.to_string()]).is_empty();
-        if global && !MCP_EXTRA_ARGS_GLOBALS.contains(&name) {
+    let mut args = vec!["--json".to_string()];
+    append_common_global_args(&mut args, arguments, session)?;
+    // The CLI reads global flags anywhere in argv, so a tool argument such as
+    // a selector could otherwise carry its own --allowed-domains or --session.
+    let trusted: Vec<&str> = args.iter().map(|a| global_flag_name(a)).collect();
+    let tokens = command_args
+        .iter()
+        .map(|t| (t, MCP_TOOL_GLOBALS))
+        .chain(extra_args.iter().map(|t| (t, &[][..])));
+    for (token, tool_globals) in tokens {
+        let name = global_flag_name(token);
+        if !crate::flags::clean_args(&[name.to_string()]).is_empty() {
+            continue;
+        }
+        if !MCP_EXTRA_ARGS_GLOBALS.contains(&name) && !tool_globals.contains(&name) {
             return Err(ProtocolError::invalid_params(format!(
-                "extraArgs may not set {}; configure it in the MCP server's environment or config",
+                "Tool arguments may not set {}; configure it in the MCP server's environment or config",
+                name
+            )));
+        }
+        if name != "--json" && trusted.contains(&name) {
+            return Err(ProtocolError::invalid_params(format!(
+                "Tool arguments may not set {}; it is already set for this call",
                 name
             )));
         }
     }
-    let mut args = vec!["--json".to_string()];
-    append_common_global_args(&mut args, arguments, session)?;
     args.extend(command_args);
     args.extend(extra_args);
     Ok(args)
+}
+
+fn global_flag_name(token: &str) -> &str {
+    token.split('=').next().unwrap_or(token)
 }
 
 fn command_parts(command: &str) -> Vec<String> {
@@ -5122,6 +5151,48 @@ mod tests {
     }
 
     #[test]
+    fn tool_arguments_cannot_carry_global_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CONFIG",
+            "HOME",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_CONFIG");
+        guard.set("HOME", dir.path().to_str().unwrap());
+        let arguments = json!({ "session": "app", "allowedDomains": ["example.com"] });
+        for command in [
+            vec!["fill", "--allowed-domains", "evil.com"],
+            vec!["open", "--allowed-domains=evil.com"],
+            vec!["fill", "--session", "other"],
+            vec!["fill", "--init-script", "/x.js"],
+        ] {
+            let command = command.into_iter().map(String::from).collect();
+            let error = cli_tool_args(&arguments, command, Some("app")).unwrap_err();
+            assert!(error.message.contains("may not set"), "{}", error.message);
+        }
+        let open = cli_tool_args(
+            &arguments,
+            open_args(&json!({ "headed": true, "url": "https://example.com" })).unwrap(),
+            Some("app"),
+        );
+        assert!(open.is_ok());
+        let screenshot = cli_tool_args(
+            &arguments,
+            vec![
+                "--screenshot-dir".into(),
+                "/tmp".into(),
+                "screenshot".into(),
+            ],
+            Some("app"),
+        );
+        assert!(screenshot.is_ok());
+        let extra = json!({ "extraArgs": ["--screenshot-dir", "/tmp"] });
+        assert!(cli_tool_args(&extra, vec!["open".to_string()], None).is_err());
+    }
+
+    #[test]
     fn extra_args_reject_operator_owned_globals() {
         let dir = tempfile::tempdir().unwrap();
         let guard = crate::test_utils::EnvGuard::new(&[
@@ -5143,7 +5214,7 @@ mod tests {
         ] {
             let arguments = json!({ "extraArgs": bad });
             let error = cli_tool_args(&arguments, vec!["open".to_string()], None).unwrap_err();
-            assert!(error.message.contains("extraArgs may not set"), "{:?}", bad);
+            assert!(error.message.contains("may not set"), "{:?}", bad);
         }
         for ok in [vec!["--engine", "obscura"], vec!["--full"], vec!["-i"]] {
             let arguments = json!({ "extraArgs": ok });
