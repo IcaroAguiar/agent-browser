@@ -3651,12 +3651,19 @@ Examples:
 agent-browser mcp - Start an MCP stdio server
 
 Usage: agent-browser mcp [--tools <profiles>]
+       agent-browser mcp call <tool> [<arguments-json> | -] [--tools <profiles>]
 
 Starts a Model Context Protocol server over stdio. MCP clients launch this
 command as a subprocess and communicate with newline-delimited JSON-RPC.
 stdout is reserved for MCP protocol messages; logs and diagnostics use stderr.
 The server defaults to MCP protocol 2025-11-25 and accepts older supported
 client protocol versions during initialization.
+
+mcp call runs one tool without a stdio session and prints its tools/call
+result as JSON, with the agent-browser version in _meta.agentBrowserVersion.
+Pass the arguments as a JSON object, or - to read them from stdin. Every tool
+is available unless --tools limits the call. Exit code: 0 on success, 1 when
+the tool reports an error, 2 for an unknown tool or invalid arguments.
 
 The default tools profile is core, which keeps MCP context small for everyday
 browser automation. Use --tools all for the full typed CLI parity surface, or

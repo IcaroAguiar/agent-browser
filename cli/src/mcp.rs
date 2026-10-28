@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -505,6 +505,70 @@ const MOBILE_PROFILE_TOOLS: &[&str] = &[
     TOOL_SWIPE,
     TOOL_DEVICE,
 ];
+
+/// Run one MCP tool call without the stdio session, print its `tools/call`
+/// result as JSON, and return the process exit code: 0 on success, 1 when the
+/// tool reports an error, 2 when the call itself is invalid.
+pub fn run_mcp_call(args: &[String]) -> i32 {
+    let mut stdout = io::stdout();
+    let output = match parse_mcp_call(args) {
+        Ok((name, arguments, config)) => {
+            match call_tool(
+                Some(&json!({ "name": name, "arguments": arguments })),
+                &config,
+            ) {
+                Ok(mut result) => {
+                    result["_meta"] = json!({ "agentBrowserVersion": env!("CARGO_PKG_VERSION") });
+                    Ok(result)
+                }
+                Err(err) => Err((err.code, err.message)),
+            }
+        }
+        Err(message) => Err((-32602, message)),
+    };
+    let (value, code) = match output {
+        Ok(result) => {
+            let failed = result["isError"].as_bool().unwrap_or(false);
+            (result, if failed { 1 } else { 0 })
+        }
+        Err((code, message)) => (json!({ "error": { "code": code, "message": message } }), 2),
+    };
+    if write_json_line(&mut stdout, &value).is_err() {
+        return 2;
+    }
+    code
+}
+
+fn parse_mcp_call(args: &[String]) -> Result<(String, Value, McpConfig), String> {
+    const USAGE: &str =
+        "Usage: agent-browser mcp call <tool> [<arguments-json> | -] [--tools <profiles>]";
+    let Some(name) = args.first().filter(|name| !name.starts_with('-')) else {
+        return Err(format!("Missing tool name\n{}", USAGE));
+    };
+    let (raw, rest) = match args.get(1) {
+        Some(value) if value == "-" => {
+            let mut input = String::new();
+            io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|e| format!("Failed to read arguments from stdin: {}", e))?;
+            (Some(input), &args[2..])
+        }
+        Some(value) if !value.starts_with("--") => (Some(value.clone()), &args[2..]),
+        _ => (None, &args[1..]),
+    };
+    let arguments = match raw {
+        Some(raw) => serde_json::from_str(&raw)
+            .map_err(|e| format!("Tool arguments must be a JSON object: {}", e))?,
+        None => json!({}),
+    };
+    // Profiles only bound the size of `tools/list`, which a single call never sends.
+    let config = if rest.is_empty() {
+        McpConfig::from_profiles(vec![ToolProfile::All])
+    } else {
+        parse_mcp_config(rest)?
+    };
+    Ok((name.clone(), arguments, config))
+}
 
 /// Run the MCP stdio server until stdin closes or a `shutdown` request is
 /// received.
@@ -4735,6 +4799,38 @@ mod tests {
         assert!(config.allows(TOOL_READ));
         assert!(config.allows(TOOL_NETWORK_HAR_START));
         assert!(config.allows(TOOL_REACT_TREE));
+    }
+
+    #[test]
+    fn parse_mcp_call_defaults_to_every_tool() {
+        let (name, arguments, config) =
+            parse_mcp_call(&[TOOL_OPEN.into(), r#"{"url":"https://example.com"}"#.into()]).unwrap();
+        assert_eq!(name, TOOL_OPEN);
+        assert_eq!(arguments["url"], "https://example.com");
+        assert!(config.allows(TOOL_NETWORK_HAR_START));
+        assert!(config.allows(TOOL_REACT_TREE));
+    }
+
+    #[test]
+    fn parse_mcp_call_limits_tools_to_requested_profiles() {
+        let (_, arguments, config) =
+            parse_mcp_call(&[TOOL_OPEN.into(), "--tools".into(), "core".into()]).unwrap();
+        assert_eq!(arguments, json!({}));
+        assert!(config.allows(TOOL_OPEN));
+        assert!(!config.allows(TOOL_NETWORK_HAR_START));
+    }
+
+    #[test]
+    fn parse_mcp_call_rejects_missing_tool_and_bad_json() {
+        assert!(parse_mcp_call(&[])
+            .unwrap_err()
+            .contains("Missing tool name"));
+        assert!(parse_mcp_call(&["--tools".into()])
+            .unwrap_err()
+            .contains("Missing tool name"));
+        assert!(parse_mcp_call(&[TOOL_OPEN.into(), "{".into()])
+            .unwrap_err()
+            .contains("JSON object"));
     }
 
     #[test]
