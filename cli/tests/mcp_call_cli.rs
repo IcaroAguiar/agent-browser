@@ -53,6 +53,10 @@ fn mcp_call_reports_invalid_calls_with_exit_code_two() {
         .as_str()
         .unwrap()
         .contains("Unknown tool"));
+    assert_eq!(
+        result["_meta"]["agentBrowserVersion"],
+        env!("CARGO_PKG_VERSION")
+    );
 
     let (code, result) = mcp_call(&["agent_browser_tools_profiles", "not json"], None);
     assert_eq!(code, 2);
