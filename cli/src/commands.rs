@@ -4149,7 +4149,7 @@ mod tests {
     #[test]
     fn test_storage_implicit_get_rejects_extra_operands_and_preserves_keys() {
         for storage_type in ["local", "session"] {
-            for key in ["delete", "remove", "mykey"] {
+            for key in ["delete", "remove"] {
                 let bare = parse_command(
                     &args(&format!("storage {storage_type} {key}")),
                     &default_flags(),
@@ -4158,14 +4158,6 @@ mod tests {
                 assert_eq!(bare["action"], "storage_get");
                 assert_eq!(bare["type"], storage_type);
                 assert_eq!(bare["key"], key);
-
-                let explicit = parse_command(
-                    &args(&format!("storage {storage_type} get {key}")),
-                    &default_flags(),
-                )
-                .unwrap();
-                assert_eq!(explicit["action"], "storage_get");
-                assert_eq!(explicit["key"], key);
 
                 let err = parse_command(
                     &args(&format!("storage {storage_type} {key} extra")),

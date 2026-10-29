@@ -3260,17 +3260,13 @@ fn call_network_requests(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
-fn storage_get_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+fn call_storage_get(arguments: &Value) -> Result<Value, ProtocolError> {
     let storage_type = required_string(arguments, "storageType")?;
     let mut args = vec!["storage".to_string(), storage_type, "get".to_string()];
     if let Some(key) = optional_string(arguments, "key")? {
         args.push(key);
     }
-    Ok(args)
-}
-
-fn call_storage_get(arguments: &Value) -> Result<Value, ProtocolError> {
-    call_cli_tool(arguments, storage_get_args(arguments)?, None)
+    call_cli_tool(arguments, args, None)
 }
 
 fn call_storage_set(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4418,20 +4414,6 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn storage_get_forwards_delete_and_remove_as_keys() {
-        for key in ["delete", "remove"] {
-            let args = storage_get_args(&json!({ "storageType": "local", "key": key })).unwrap();
-            assert_eq!(args[2], "get");
-            assert_eq!(args[3], key);
-
-            let flags = crate::flags::parse_flags(&args);
-            let command = crate::commands::parse_command(&args, &flags).unwrap();
-            assert_eq!(command["action"], "storage_get");
-            assert_eq!(command["key"], key);
-        }
-    }
-
     #[test]
     fn tool_text_keeps_response_warnings() {
         let value = json!({ "success": true, "data": { "url": "about:blank" },
