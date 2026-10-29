@@ -101,10 +101,14 @@ export async function runMcpTool<TData = unknown>(
 /** The catalog this package ships describes one agent-browser minor; another minor may take different arguments. */
 function assertMatchingVersion(installed: string | undefined): void {
   if (installed !== undefined && !matchesPackageMinor(installed)) {
-    throw new Error(
-      `agent-browser ${installed} in the sandbox does not match @agent-browser/eve ${AGENT_BROWSER_SANDBOX_VERSION}. Install agent-browser@${AGENT_BROWSER_SANDBOX_VERSION} or set installSpec to it.`,
-    );
+    throw versionMismatchError(installed);
   }
+}
+
+function versionMismatchError(installed: string): Error {
+  return new Error(
+    `agent-browser ${installed} in the sandbox does not match @agent-browser/eve ${AGENT_BROWSER_SANDBOX_VERSION}. Install agent-browser@${AGENT_BROWSER_SANDBOX_VERSION} or set installSpec to it.`,
+  );
 }
 
 function matchesPackageMinor(version: string): boolean {
@@ -143,17 +147,14 @@ async function ensureInstalled(sandbox: EveSandboxSession, abortSignal?: AbortSi
 
 async function installIfMissingOrStale(sandbox: EveSandboxSession, abortSignal?: AbortSignal): Promise<void> {
   const config = extension.config;
-  const probe = await withDeadline(
-    sandbox.run({
-      abortSignal,
-      command: `${quoteShellArg(config.binary)} --version 2>/dev/null`,
-    }),
-    "The browser install probe",
-  );
-  // An older CLI already in the sandbox gets replaced, not kept.
-  const installed = (probe.stdout ?? "").trim().split(/\s+/).at(-1) ?? "";
-  if ((probe.exitCode ?? 0) === 0 && matchesPackageMinor(installed)) {
+  const installed = await probeVersion(sandbox, abortSignal);
+  if (installed !== undefined && matchesPackageMinor(installed)) {
     return;
+  }
+  // Reinstalling a custom spec or binary would repeat on every call, so report the mismatch instead.
+  const userOwned = config.installSpec !== undefined || config.binary !== "agent-browser";
+  if (installed !== undefined && userOwned) {
+    throw versionMismatchError(installed);
   }
   await withDeadline(
     installAgentBrowser(sandbox, {
@@ -164,4 +165,26 @@ async function installIfMissingOrStale(sandbox: EveSandboxSession, abortSignal?:
     }),
     "Installing agent-browser",
   );
+  const reinstalled = await probeVersion(sandbox, abortSignal);
+  if (reinstalled === undefined || !matchesPackageMinor(reinstalled)) {
+    throw versionMismatchError(reinstalled ?? "missing");
+  }
+}
+
+/** The installed CLI version, or undefined when the binary is missing. */
+async function probeVersion(
+  sandbox: EveSandboxSession,
+  abortSignal?: AbortSignal,
+): Promise<string | undefined> {
+  const probe = await withDeadline(
+    sandbox.run({
+      abortSignal,
+      command: `${quoteShellArg(extension.config.binary)} --version 2>/dev/null`,
+    }),
+    "The browser install probe",
+  );
+  if ((probe.exitCode ?? 0) !== 0) {
+    return undefined;
+  }
+  return (probe.stdout ?? "").trim().split(/\s+/).at(-1) ?? "";
 }

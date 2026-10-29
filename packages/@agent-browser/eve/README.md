@@ -64,8 +64,8 @@ export default browser({
   // (hidden from the model via toModelOutput; capped at 4 MB per image)
 
   // Install behavior
-  autoInstall: true, // install agent-browser on first use when missing
-  installSpec: "agent-browser@0.31.2", // defaults to the version matching this package
+  autoInstall: true, // install agent-browser on first use, or replace an older default install
+  installSpec: undefined, // npm spec; must install this package's agent-browser minor (default: the matching version)
   installBrowser: true, // download Chromium during auto-install
   installSystemDependencies: true, // apt/dnf Chromium libraries during auto-install
 

@@ -124,35 +124,56 @@ test("runs one mcp call per tool call with the default session", async () => {
 
 test("auto-installs when the binary is missing", async () => {
   resetConfig({ installSystemDependencies: false });
-  const commands = [];
-  const sandbox = {
-    async run({ command }) {
-      commands.push(command);
-      if (command.endsWith(" --version 2>/dev/null")) {
-        return { exitCode: 127, stdout: "", stderr: "" };
-      }
-      return { exitCode: 0, stdout: OK({}), stderr: "" };
-    },
-  };
+  const sandbox = versionSandbox([undefined, AGENT_BROWSER_SANDBOX_VERSION]);
   await tools.close.execute({}, fakeCtx(sandbox));
-  assert.ok(commands.some((command) => command.includes("npm install -g agent-browser@")));
+  assert.ok(sandbox.commands.some((command) => command.includes("npm install -g agent-browser@")));
   resetConfig();
 });
 
 test("reinstalls when the sandbox has another agent-browser minor", async () => {
   resetConfig({ installSystemDependencies: false });
+  const sandbox = versionSandbox(["0.1.0", AGENT_BROWSER_SANDBOX_VERSION]);
+  await tools.close.execute({}, fakeCtx(sandbox));
+  assert.ok(sandbox.commands.some((command) => command.includes("npm install -g agent-browser@")));
+  resetConfig();
+});
+
+function versionSandbox(versions) {
   const commands = [];
-  const sandbox = {
+  return {
+    commands,
     async run({ command }) {
       commands.push(command);
       if (command.endsWith(" --version 2>/dev/null")) {
-        return { exitCode: 0, stdout: "agent-browser 0.1.0\n", stderr: "" };
+        const version = versions.shift();
+        return version === undefined
+          ? { exitCode: 127, stdout: "", stderr: "" }
+          : { exitCode: 0, stdout: `agent-browser ${version}\n`, stderr: "" };
       }
       return { exitCode: 0, stdout: OK({}), stderr: "" };
     },
   };
-  await tools.close.execute({}, fakeCtx(sandbox));
-  assert.ok(commands.some((command) => command.includes("npm install -g agent-browser@")));
+}
+
+test("fails with a config error when the install still has another minor", async () => {
+  resetConfig({ installSystemDependencies: false });
+  const sandbox = versionSandbox(["0.1.0", "0.1.0"]);
+  await assert.rejects(
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /agent-browser 0\.1\.0 in the sandbox does not match/,
+  );
+  assert.ok(!sandbox.commands.some((command) => command.includes(" mcp call ")));
+  resetConfig();
+});
+
+test("does not reinstall a custom installSpec on a version mismatch", async () => {
+  resetConfig({ installSpec: "agent-browser@0.1.0", installSystemDependencies: false });
+  const sandbox = versionSandbox(["0.1.0"]);
+  await assert.rejects(
+    () => tools.close.execute({}, fakeCtx(sandbox)),
+    /agent-browser 0\.1\.0 in the sandbox does not match/,
+  );
+  assert.ok(!sandbox.commands.some((command) => command.includes("npm install -g")));
   resetConfig();
 });
 
