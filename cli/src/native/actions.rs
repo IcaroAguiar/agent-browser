@@ -14744,17 +14744,13 @@ mod tests {
             .event_tracker
             .add_error("boom", Some("app.js"), Some(7), Some(3));
 
-        let resp = execute_command(
-            &json!({ "id": "1", "action": "errors", "clear": true }),
-            &mut state,
-        )
-        .await;
-        assert_eq!(resp["success"], true);
-        assert_eq!(resp["data"]["cleared"], true);
+        let resp = handle_errors(&json!({ "clear": true }), &mut state)
+            .await
+            .unwrap();
+        assert_eq!(resp["cleared"], true);
 
-        let resp = execute_command(&json!({ "id": "2", "action": "errors" }), &mut state).await;
-        assert_eq!(resp["success"], true);
-        assert_eq!(resp["data"]["errors"], json!([]));
+        let resp = handle_errors(&json!({}), &mut state).await.unwrap();
+        assert_eq!(resp["errors"], json!([]));
     }
 
     #[test]
