@@ -5272,35 +5272,21 @@ mod tests {
 
     #[test]
     fn common_global_args_include_idle_timeout() {
-        let mut args = Vec::new();
+        for (idle_timeout, normalized) in [
+            ("0", Some("0")),
+            ("30s", Some("30000")),
+            ("2305843009213693957s", None),
+        ] {
+            let mut args = Vec::new();
+            append_common_global_args(&mut args, &json!({ "idleTimeout": idle_timeout }), None)
+                .unwrap();
 
-        append_common_global_args(
-            &mut args,
-            &json!({
-                "idleTimeout": "30s"
-            }),
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(args, vec!["--idle-timeout", "30s"]);
-        assert_eq!(
-            crate::flags::parse_flags(&args).idle_timeout.as_deref(),
-            Some("30000")
-        );
-
-        let mut args = Vec::new();
-        append_common_global_args(
-            &mut args,
-            &json!({
-                "idleTimeout": "2305843009213693957s"
-            }),
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(args, vec!["--idle-timeout", "2305843009213693957s"]);
-        assert_eq!(crate::flags::parse_flags(&args).idle_timeout, None);
+            assert_eq!(args, vec!["--idle-timeout", idle_timeout]);
+            assert_eq!(
+                crate::flags::parse_flags(&args).idle_timeout.as_deref(),
+                normalized
+            );
+        }
     }
 
     #[test]
