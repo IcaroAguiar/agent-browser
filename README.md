@@ -901,6 +901,8 @@ agent-browser includes security features for safe AI agent deployments. All feat
 | `AGENT_BROWSER_CONFIRM_INTERACTIVE` | Enable interactive confirmation prompts  |
 | `AGENT_BROWSER_PLUGINS`             | JSON plugin registry override            |
 
+Invalid `--max-output` and `AGENT_BROWSER_MAX_OUTPUT` values emit a warning and are ignored; any lower-priority environment or config limit remains in effect.
+
 See [Security documentation](https://agent-browser.dev/security) for details.
 
 ### Plugin System

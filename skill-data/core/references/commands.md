@@ -28,6 +28,8 @@ agent-browser close           # Close browser (aliases: quit, exit)
 agent-browser connect 9222    # Connect to browser via CDP port
 ```
 
+Invalid `--max-output` and `AGENT_BROWSER_MAX_OUTPUT` values emit a warning and are ignored; any lower-priority environment or config limit remains in effect.
+
 After `connect`, the session stays attached until `agent-browser close`. Later commands without a connection flag run against the same browser, as if you passed `--cdp` again. If that browser goes away, commands fail instead of launching a local one.
 
 If the debugging port is not open yet, `connect` and `--cdp` wait up to 2 seconds for it before failing.
