@@ -5661,6 +5661,25 @@ mod tests {
     }
 
     #[test]
+    fn test_set_rejects_non_finite_float_arguments() {
+        for command in [
+            "set viewport 800 600 nan",
+            "set viewport 800 600 inf",
+            "set geo nan 10",
+            "set geo 10 inf",
+        ] {
+            let error = parse_command(&args(command), &default_flags())
+                .unwrap_err()
+                .format();
+            assert!(
+                error.contains("finite number"),
+                "command should reject non-finite value: {}",
+                command
+            );
+        }
+    }
+
+    #[test]
     fn test_find_first_no_value() {
         let cmd = parse_command(&args("find first a click"), &default_flags()).unwrap();
         assert_eq!(cmd["action"], "nth");

@@ -339,6 +339,8 @@ agent-browser set credentials <u> <p> # HTTP basic auth for current and future t
 agent-browser set media [dark|light]  # Emulate color scheme
 ```
 
+Viewport scales and geolocation coordinates must be finite numbers.
+
 `set credentials` applies HTTP Basic Authentication to the current tab and tabs opened later. `set offline off` and `set headers '{}'` restore the default setup for future tabs.
 
 ### Cookies & Storage

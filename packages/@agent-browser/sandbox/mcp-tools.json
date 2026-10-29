@@ -11111,7 +11111,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set geolocation.",
+      "description": "Set geolocation with finite latitude and longitude.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -11527,7 +11527,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set viewport size.",
+      "description": "Set viewport size. The optional scale must be finite.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

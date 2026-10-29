@@ -203,6 +203,8 @@ agent-browser set media dark                  # Emulate color scheme
 agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
 
+Viewport scales and geolocation coordinates must be finite numbers.
+
 ## Cookies and Storage
 
 ```bash
