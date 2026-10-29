@@ -245,6 +245,9 @@ async fn invoke_plugin_process(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if protocol != PROTOCOL_VERSION {
+        if !expose_plugin_error {
+            return Err(format!("Plugin '{}' used unsupported protocol", plugin.name));
+        }
         return Err(format!(
             "Plugin '{}' used unsupported protocol '{}'",
             plugin.name, protocol
