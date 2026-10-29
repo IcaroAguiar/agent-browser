@@ -56,12 +56,15 @@ fn parse_idle_timeout(s: &str) -> Result<String, String> {
         let (num_str, unit) = s.split_at(s.len() - 1);
         let num: u64 = num_str.parse().map_err(|_| "Invalid number")?;
 
-        let ms = match unit {
-            "s" => num * 1000,
-            "m" => num * 60 * 1000,
-            "h" => num * 60 * 60 * 1000,
+        let multiplier: u64 = match unit {
+            "s" => 1000,
+            "m" => 60 * 1000,
+            "h" => 60 * 60 * 1000,
             _ => return Err("Invalid idle timeout unit (use s, m, h, or raw ms)".to_string()),
         };
+        let ms = num
+            .checked_mul(multiplier)
+            .ok_or("Idle timeout too large")?;
         return Ok(ms.to_string());
     }
 
