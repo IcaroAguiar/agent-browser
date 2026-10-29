@@ -2955,6 +2955,11 @@ fn call_wait_flag(
     value_key: &str,
 ) -> Result<Value, ProtocolError> {
     let value = required_string(arguments, value_key)?;
+    if flag.is_none() && value.parse::<u64>().is_ok() {
+        return Err(ProtocolError::invalid_params(
+            "A bare integer selector is treated as a millisecond wait. Use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.",
+        ));
+    }
     let mut args = vec!["wait".to_string()];
     if let Some(flag) = flag {
         args.push(flag.to_string());
