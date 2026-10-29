@@ -1719,8 +1719,8 @@ Global Options:
   --allowed-domains <list>  Restrict read fetches and redirects to allowed domains
   --content-boundaries Wrap read output in boundary markers
   --max-output <chars> Truncate read output to N chars
-  Invalid --max-output and AGENT_BROWSER_MAX_OUTPUT values warn and are ignored.
-  Any lower-priority environment or config limit remains in effect.
+  Invalid --max-output and AGENT_BROWSER_MAX_OUTPUT values warn and leave the
+  existing output limit unchanged.
 
 Examples:
   agent-browser read
@@ -4113,8 +4113,7 @@ Options:
   --download-path <path>     Default download directory (or AGENT_BROWSER_DOWNLOAD_PATH)
   --content-boundaries       Wrap page output in boundary markers (or AGENT_BROWSER_CONTENT_BOUNDARIES)
   --max-output <chars>       Truncate page output to N chars (or AGENT_BROWSER_MAX_OUTPUT)
-                             Invalid values warn and are ignored. Any lower-priority environment
-                             or config limit remains in effect.
+                             Invalid values warn and leave the existing output limit unchanged.
   --allowed-domains <list>   Restrict network domains; rejects CDP, auto-connect, profiles, restore/state replay, direct-page providers, unsafe startup args, iOS/Safari (or AGENT_BROWSER_ALLOWED_DOMAINS)
   --action-policy <path>     Action policy JSON file (or AGENT_BROWSER_ACTION_POLICY)
   --confirm-actions <list>   Categories requiring confirmation (or AGENT_BROWSER_CONFIRM_ACTIONS)
