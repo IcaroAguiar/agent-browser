@@ -2590,7 +2590,7 @@ agent-browser storage - Manage web storage
 Usage: agent-browser storage <type> [get [key] | set <key> <value> | clear | <key>]
 
 Manage localStorage and sessionStorage.
-A bare-key read accepts one key; extra arguments are errors.
+Reads accept at most one key, sets require one key and one value, and clears take no operands. A bare key is shorthand for a one-key read.
 
 Types:
   local                localStorage

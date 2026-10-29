@@ -3509,26 +3509,27 @@ fn parse_network(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     }
 }
 
-/// Parses storage operations, including one-key shorthand reads.
+/// Parses storage operations with exact operand counts and one-key read shorthand.
 fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
     const VALID: &[&str] = &["local", "session"];
 
     match rest.first().copied() {
         Some("local") | Some("session") => {
             let storage_type = rest.first().unwrap();
-            let (op, key, value) = match rest.get(1) {
-                Some(&"get") => ("get", rest.get(2), rest.get(3)),
-                Some(&"set") => ("set", rest.get(2), rest.get(3)),
-                Some(&"clear") => ("clear", rest.get(2), rest.get(3)),
-                Some(_) if rest.get(2).is_some() => {
-                    return Err(ParseError::InvalidValue {
-                        message: format!("Unexpected argument: {}", rest[2]),
-                        usage: "storage <local|session> [get [key] | set <key> <value> | clear | <key>]",
-                    });
-                }
-                Some(_) => ("get", rest.get(1), None),
-                None => ("get", None, None),
+            let (op, key, value, max_rest_len) = match rest.get(1) {
+                Some(&"get") => ("get", rest.get(2), None, 3),
+                Some(&"set") => ("set", rest.get(2), rest.get(3), 4),
+                Some(&"clear") => ("clear", None, None, 2),
+                Some(_) => ("get", rest.get(1), None, 2),
+                None => ("get", None, None, 2),
             };
+            if let Some(extra) = rest.get(max_rest_len) {
+                return Err(ParseError::InvalidValue {
+                    message: format!("Unexpected argument: {}", extra),
+                    usage:
+                        "storage <local|session> [get [key] | set <key> <value> | clear | <key>]",
+                });
+            }
             match op {
                 "set" => {
                     let k = key.ok_or_else(|| ParseError::MissingArguments {
@@ -4171,6 +4172,23 @@ mod tests {
                     }
                     other => panic!("expected InvalidValue, got {:?}", other),
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_operations_reject_extra_operands() {
+        for (command, extra) in [
+            ("storage local get greeting extra", "extra"),
+            ("storage local set greeting hello world", "world"),
+            ("storage local clear greeting", "greeting"),
+        ] {
+            let error = parse_command(&args(command), &default_flags()).unwrap_err();
+            match error {
+                ParseError::InvalidValue { message, .. } => {
+                    assert_eq!(message, format!("Unexpected argument: {}", extra));
+                }
+                other => panic!("expected InvalidValue, got {:?}", other),
             }
         }
     }

@@ -215,7 +215,7 @@ agent-browser storage local set k v       # Set value
 agent-browser storage local clear         # Clear all
 ```
 
-A bare key is shorthand for a one-key read. Extra arguments after that key produce an error.
+Reads accept at most one key, sets require one key and one value, and clears take no operands. A bare key is shorthand for a one-key read.
 
 ## Network
 
