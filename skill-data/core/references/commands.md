@@ -215,7 +215,7 @@ agent-browser storage local set k v       # Set value
 agent-browser storage local clear         # Clear all
 ```
 
-Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. Unknown flags and extra arguments return an error.
+Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. When setting one cookie, unknown flags and extra arguments return an error.
 
 ```bash
 agent-browser cookies set session_id abc123 --http-only --same-site Strict

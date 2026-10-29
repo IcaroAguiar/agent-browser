@@ -2637,7 +2637,7 @@ Cookie Set Options:
   --expires <timestamp>              Expiration time (Unix timestamp in seconds)
 
 The legacy camelCase spellings --httpOnly and --sameSite are still accepted.
-Unknown flags and unexpected arguments are errors.
+When setting one cookie, unknown flags and extra arguments return an error.
 
 Note: If --url, --domain, and --path are all omitted, the cookie will be set
 for the current page URL.
