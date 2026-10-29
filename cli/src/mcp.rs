@@ -1511,7 +1511,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_ERRORS,
             "Page errors",
-            "Read page errors.",
+            "Read captured page errors. Set `clear` to delete the captured error log.",
             json!({ "clear": { "type": "boolean" } }),
             &[],
         ),

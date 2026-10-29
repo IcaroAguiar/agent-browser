@@ -14737,6 +14737,26 @@ mod tests {
         assert!(state.browser.is_none());
     }
 
+    #[tokio::test]
+    async fn errors_clear_empties_page_error_log() {
+        let mut state = DaemonState::new();
+        state
+            .event_tracker
+            .add_error("boom", Some("app.js"), Some(7), Some(3));
+
+        let resp = execute_command(
+            &json!({ "id": "1", "action": "errors", "clear": true }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], true);
+        assert_eq!(resp["data"]["cleared"], true);
+
+        let resp = execute_command(&json!({ "id": "2", "action": "errors" }), &mut state).await;
+        assert_eq!(resp["success"], true);
+        assert_eq!(resp["data"]["errors"], json!([]));
+    }
+
     #[test]
     fn find_actions_help_text_matches_the_accepted_set() {
         assert_eq!(FIND_ACTIONS.join(", "), "click, fill, check, hover, text");

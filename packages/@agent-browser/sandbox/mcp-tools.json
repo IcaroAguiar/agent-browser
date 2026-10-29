@@ -3820,7 +3820,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Read page errors.",
+      "description": "Read captured page errors. Set `clear` to delete the captured error log.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
