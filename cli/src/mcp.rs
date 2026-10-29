@@ -993,7 +993,13 @@ fn tools() -> Vec<Value> {
         ),
         tool(TOOL_SCROLL_INTO_VIEW, "Scroll into view", "Scroll an element into view.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_WAIT_MS, "Wait milliseconds", "Wait for a fixed time.", json!({ "ms": { "type": "integer", "minimum": 0 } }), &["ms"]),
-        wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element to appear.", json!({ "selector": selector_schema() }), &["selector"]),
+        wait_tool(
+            TOOL_WAIT_FOR_SELECTOR,
+            "Wait for selector",
+            "Wait for an element with a CSS selector or @ref. Bare integers are rejected because they are treated as millisecond waits; use CSS selector syntax for numeric IDs.",
+            json!({ "selector": selector_schema() }),
+            &["selector"],
+        ),
         wait_tool(TOOL_WAIT_FOR_TEXT, "Wait for text", "Wait for text to appear.", json!({ "text": { "type": "string" } }), &["text"]),
         wait_tool(TOOL_WAIT_FOR_URL, "Wait for URL", "Wait for the current URL to match a pattern.", json!({ "url": { "type": "string", "description": "URL glob or pattern." } }), &["url"]),
         wait_tool(TOOL_WAIT_FOR_LOAD, "Wait for load state", "Wait for a page load state.", json!({ "state": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"] } }), &["state"]),
@@ -4521,6 +4527,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn wait_for_selector_rejects_integer_at_mcp_boundary() {
+        let error = call_tool(
+            Some(&json!({
+                "name": TOOL_WAIT_FOR_SELECTOR,
+                "arguments": { "selector": "7", "waitTimeoutMs": 100 }
+            })),
+            &McpConfig::all(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("millisecond wait"));
+    }
 
     #[cfg(unix)]
     #[test]

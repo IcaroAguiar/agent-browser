@@ -15097,7 +15097,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Wait for an element to appear.",
+      "description": "Wait for an element with a CSS selector or @ref. Bare integers are rejected because they are treated as millisecond waits; use CSS selector syntax for numeric IDs.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
