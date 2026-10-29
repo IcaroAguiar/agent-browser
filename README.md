@@ -603,6 +603,8 @@ Starts a Model Context Protocol server over stdio. MCP clients launch this comma
 
 `mcp call` runs one MCP tool without a stdio session and prints its `tools/call` result as JSON, with the agent-browser version in `_meta.agentBrowserVersion`. Pass the tool arguments as a JSON object, or `-` to read them from stdin. Every tool is available unless `--tools` limits the call to profiles. The exit code is 0 on success, 1 when the tool reports an error, and 2 for an unknown tool or invalid arguments. Use it from runtimes that cannot keep a stdio session open between tool calls, such as serverless agents. Access settings such as `AGENT_BROWSER_ALLOWED_DOMAINS` come from the environment, as with the server.
 
+In a Vercel Sandbox, `startAgentBrowserMcp` runs the server over the sandbox command's stdin. See [Serverless (Vercel)](#serverless-vercel).
+
 The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`.
 
 Profiles:
@@ -1478,6 +1480,24 @@ const result = await withAgentBrowserSandbox(async (sandbox) => {
   return runAgentBrowserCommand(sandbox, ["screenshot"]);
 });
 ```
+
+To keep one MCP server running in a Vercel Sandbox, `startAgentBrowserMcp` from `@agent-browser/sandbox/vercel` starts `agent-browser mcp` and talks to it over the command's stdin, so every tool call reuses the same process:
+
+```typescript
+import { startAgentBrowserMcp, withAgentBrowserSandbox } from "@agent-browser/sandbox/vercel";
+
+const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
+  const mcp = await startAgentBrowserMcp(sandbox, { timeout: 60_000 });
+  try {
+    await mcp.callTool("agent_browser_open", { url: "https://example.com" });
+    return await mcp.callTool("agent_browser_snapshot", { interactive: true });
+  } finally {
+    await mcp.close();
+  }
+});
+```
+
+It needs `@vercel/sandbox` 3.7 or later. `timeout` applies to each request. For another runtime that exposes a process with `stdin` and `stdout` streams, use `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
 
 Install `@agent-browser/sandbox` and `@vercel/sandbox` in the consuming app. See the [sandbox helper example](examples/sandbox/) for minimal Vercel Sandbox usage, or the [environments example](examples/environments/) for a full UI demo with a deploy-to-Vercel button.
 
