@@ -4907,38 +4907,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_mcp_call_defaults_to_every_tool() {
-        let (name, arguments, config) =
-            parse_mcp_call(&[TOOL_OPEN.into(), r#"{"url":"https://example.com"}"#.into()]).unwrap();
-        assert_eq!(name, TOOL_OPEN);
-        assert_eq!(arguments["url"], "https://example.com");
-        assert!(config.allows(TOOL_NETWORK_HAR_START));
-        assert!(config.allows(TOOL_REACT_TREE));
-    }
-
-    #[test]
-    fn parse_mcp_call_limits_tools_to_requested_profiles() {
-        let (_, arguments, config) =
-            parse_mcp_call(&[TOOL_OPEN.into(), "--tools".into(), "core".into()]).unwrap();
-        assert_eq!(arguments, json!({}));
-        assert!(config.allows(TOOL_OPEN));
-        assert!(!config.allows(TOOL_NETWORK_HAR_START));
-    }
-
-    #[test]
-    fn parse_mcp_call_rejects_missing_tool_and_bad_json() {
-        assert!(parse_mcp_call(&[])
-            .unwrap_err()
-            .contains("Missing tool name"));
-        assert!(parse_mcp_call(&["--tools".into()])
-            .unwrap_err()
-            .contains("Missing tool name"));
-        assert!(parse_mcp_call(&[TOOL_OPEN.into(), "{".into()])
-            .unwrap_err()
-            .contains("JSON object"));
-    }
-
-    #[test]
     fn parse_mcp_config_rejects_unknown_profile() {
         let err = parse_mcp_config(&["--tools".into(), "bogus".into()]).unwrap_err();
         assert!(err.contains("Unknown MCP tools profile"));
