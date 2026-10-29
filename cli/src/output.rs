@@ -2587,9 +2587,10 @@ Examples:
             r##"
 agent-browser storage - Manage web storage
 
-Usage: agent-browser storage <type> [operation] [key] [value]
+Usage: agent-browser storage <type> [get [key] | set <key> <value> | clear | <key>]
 
 Manage localStorage and sessionStorage.
+A bare-key read accepts one key; extra arguments are errors.
 
 Types:
   local                localStorage

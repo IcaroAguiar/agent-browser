@@ -12760,7 +12760,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Clear localStorage or sessionStorage.",
+      "description": "Clear all localStorage or sessionStorage entries.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -12864,7 +12864,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get localStorage or sessionStorage.",
+      "description": "Get all localStorage or sessionStorage entries, or one key.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -12971,7 +12971,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set localStorage or sessionStorage.",
+      "description": "Set one localStorage or sessionStorage key.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

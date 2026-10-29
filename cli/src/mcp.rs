@@ -1312,21 +1312,21 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_STORAGE_GET,
             "Storage get",
-            "Get localStorage or sessionStorage.",
+            "Get all localStorage or sessionStorage entries, or one key.",
             json!({ "storageType": storage_type_schema(), "key": { "type": "string" } }),
             &["storageType"],
         ),
         tool(
             TOOL_STORAGE_SET,
             "Storage set",
-            "Set localStorage or sessionStorage.",
+            "Set one localStorage or sessionStorage key.",
             json!({ "storageType": storage_type_schema(), "key": { "type": "string" }, "value": { "type": "string" } }),
             &["storageType", "key", "value"],
         ),
         tool(
             TOOL_STORAGE_CLEAR,
             "Storage clear",
-            "Clear localStorage or sessionStorage.",
+            "Clear all localStorage or sessionStorage entries.",
             json!({ "storageType": storage_type_schema() }),
             &["storageType"],
         ),
@@ -3260,13 +3260,17 @@ fn call_network_requests(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, args, None)
 }
 
-fn call_storage_get(arguments: &Value) -> Result<Value, ProtocolError> {
+fn storage_get_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let storage_type = required_string(arguments, "storageType")?;
     let mut args = vec!["storage".to_string(), storage_type, "get".to_string()];
     if let Some(key) = optional_string(arguments, "key")? {
         args.push(key);
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
+}
+
+fn call_storage_get(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, storage_get_args(arguments)?, None)
 }
 
 fn call_storage_set(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4414,6 +4418,20 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn storage_get_forwards_delete_and_remove_as_keys() {
+        for key in ["delete", "remove"] {
+            let args = storage_get_args(&json!({ "storageType": "local", "key": key })).unwrap();
+            assert_eq!(args[2], "get");
+            assert_eq!(args[3], key);
+
+            let flags = crate::flags::parse_flags(&args);
+            let command = crate::commands::parse_command(&args, &flags).unwrap();
+            assert_eq!(command["action"], "storage_get");
+            assert_eq!(command["key"], key);
+        }
+    }
+
     #[test]
     fn tool_text_keeps_response_warnings() {
         let value = json!({ "success": true, "data": { "url": "about:blank" },

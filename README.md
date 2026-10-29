@@ -358,6 +358,8 @@ agent-browser storage local clear     # Clear all
 agent-browser storage session         # Same for sessionStorage
 ```
 
+A bare key is shorthand for a one-key read. Extra arguments after that key produce an error.
+
 ### Network
 
 ```bash

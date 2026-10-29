@@ -215,6 +215,8 @@ agent-browser storage local set k v       # Set value
 agent-browser storage local clear         # Clear all
 ```
 
+A bare key is shorthand for a one-key read. Extra arguments after that key produce an error.
+
 ## Network
 
 ```bash
