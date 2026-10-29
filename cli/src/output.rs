@@ -996,6 +996,7 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
                 let label = match action {
                     Some("cookies_clear") => "Cookies cleared",
                     Some("console") => "Console log cleared",
+                    Some("errors") => "Page errors cleared",
                     _ => "Request log cleared",
                 };
                 println!("{} {}", color::success_indicator(), label);
