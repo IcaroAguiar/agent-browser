@@ -33,7 +33,7 @@
             "type": "array"
           },
           "idleTimeout": {
-            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Defaults to 1h; 0 disables idle shutdown.",
+            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",
             "type": "string"
           },
           "json": {
@@ -139,7 +139,7 @@
             "type": "array"
           },
           "idleTimeout": {
-            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Defaults to 1h; 0 disables idle shutdown.",
+            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",
             "type": "string"
           },
           "name": {
@@ -239,7 +239,7 @@
             "type": "array"
           },
           "idleTimeout": {
-            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Defaults to 1h; 0 disables idle shutdown.",
+            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",
             "type": "string"
           },
           "namespace": {
@@ -333,7 +333,7 @@
             "type": "array"
           },
           "idleTimeout": {
-            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Defaults to 1h; 0 disables idle shutdown.",
+            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",
             "type": "string"
           },
           "name": {
@@ -438,7 +438,7 @@
             "type": "array"
           },
           "idleTimeout": {
-            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Defaults to 1h; 0 disables idle shutdown.",
+            "description": "Daemon idle timeout such as 30s, 5m, 1h, or raw milliseconds. Values too large to convert to milliseconds produce a warning and are ignored. Defaults to 1h; 0 disables idle shutdown.",
             "type": "string"
           },
           "name": {
