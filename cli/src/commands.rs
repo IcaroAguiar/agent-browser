@@ -3519,7 +3519,13 @@ fn parse_storage(rest: &[&str], id: &str) -> Result<Value, ParseError> {
                 Some(&"get") => ("get", rest.get(2), rest.get(3)),
                 Some(&"set") => ("set", rest.get(2), rest.get(3)),
                 Some(&"clear") => ("clear", rest.get(2), rest.get(3)),
-                Some(_) => ("get", rest.get(1), rest.get(2)),
+                Some(_) if rest.get(2).is_some() => {
+                    return Err(ParseError::InvalidValue {
+                        message: format!("Unexpected argument: {}", rest[2]),
+                        usage: "storage <local|session> [get [key] | set <key> <value> | clear | <key>]",
+                    });
+                }
+                Some(_) => ("get", rest.get(1), None),
                 None => ("get", None, None),
             };
             match op {
