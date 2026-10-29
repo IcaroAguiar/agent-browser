@@ -43,8 +43,8 @@ fn push_launch_arg(args: &mut Vec<String>, current: &mut String) {
     current.clear();
 }
 
-/// Parse idle timeout from user-friendly format.
-/// Supports: "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
+/// Parse idle timeout from user-friendly format, returning an error on conversion overflow.
+/// Supports "10s" (seconds), "3m" (minutes), "1h" (hours), or raw milliseconds.
 fn parse_idle_timeout(s: &str) -> Result<String, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -1424,6 +1424,19 @@ mod tests {
     #[test]
     fn test_parse_idle_timeout_hours() {
         assert_eq!(parse_idle_timeout("1h").unwrap(), "3600000");
+    }
+
+    #[test]
+    fn test_parse_idle_timeout_rejects_overflow_and_accepts_boundary() {
+        assert!(parse_idle_timeout("2305843009213693957s").is_err());
+        assert!(parse_idle_timeout(&format!("{}m", u64::MAX)).is_err());
+        assert!(parse_idle_timeout("144115188075855872h").is_err());
+
+        let max_seconds = u64::MAX / 1000;
+        assert_eq!(
+            parse_idle_timeout(&format!("{}s", max_seconds)).unwrap(),
+            (max_seconds * 1000).to_string()
+        );
     }
 
     #[test]

@@ -4117,6 +4117,7 @@ Options:
   --confirm-interactive      Interactive confirmation prompts; auto-denies if stdin is not a TTY (or AGENT_BROWSER_CONFIRM_INTERACTIVE)
   --idle-timeout <time>      Shut down daemon after inactivity: 10s, 3m, 1h, or raw ms
                              (default: 1h; 0 disables; dashboard input resets the timer)
+                             Values too large to convert to milliseconds produce a warning and are ignored
   --engine <name>            Browser engine: chrome (default), lightpanda, obscura (experimental)
                              (or AGENT_BROWSER_ENGINE); Obscura rejects --proxy-bypass,
                              proxyBypass config, AGENT_BROWSER_PROXY_BYPASS, NO_PROXY/no_proxy,
