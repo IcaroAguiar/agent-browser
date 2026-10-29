@@ -953,6 +953,8 @@ agent-browser plugin list
 agent-browser plugin show vault
 ```
 
+Credential resolution, browser launch and cleanup, and launch mutation errors omit plugin response error text and unsupported protocol values from diagnostics. Manifest discovery and `plugin run` retain detailed errors. Plugins remain trusted local executables; this redaction does not sandbox them.
+
 Use a credential provider plugin for one login:
 
 ```bash

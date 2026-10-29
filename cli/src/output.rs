@@ -3808,6 +3808,9 @@ Capabilities:
 Core capabilities and protocol request types use dedicated command paths.
 Use auth login for credential.read, --provider for browser.provider, and
 a local launch for launch.mutate.
+Credential, browser-provider, and launch-mutation errors omit response error
+text and unsupported protocol values. Manifest discovery and plugin run retain
+detailed errors.
 
 Example config:
   {{
