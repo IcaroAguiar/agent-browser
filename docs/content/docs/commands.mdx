@@ -146,6 +146,8 @@ agent-browser wait "#spinner" --state hidden           # Wait for element to dis
 
 After a page change, prefer a selector, text, URL, or JavaScript condition that represents the state you need. Use `networkidle` only when the page is known to become quiet, because SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
+A load-state wait returns an error if its timeout expires.
+
 ## Downloads
 
 ```bash

@@ -2148,6 +2148,8 @@ Modes:
   --text <text>        Wait for text to appear on page (substring match)
   --download [path]    Wait for a download to complete (optionally save to path)
 
+A load-state wait returns an error if its timeout expires.
+
 Download Options (with --download):
   --timeout <ms>       Timeout in milliseconds for download to start
 

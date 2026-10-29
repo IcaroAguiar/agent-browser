@@ -214,6 +214,8 @@ After any page-changing action, pick one:
 
 Avoid using `networkidle` as a generic post-navigation or SPA wait. Server-sent events (SSE), WebSockets, polling, and long-polling can keep network activity alive indefinitely, causing the wait to time out even when the UI is ready. Use `networkidle` only for pages that are known to become quiet after navigation.
 
+A load-state wait returns an error if its timeout expires.
+
 Avoid bare `wait 2000` except when debugging — it makes scripts slow and flaky. Timeouts default to 25 seconds.
 
 ## Common workflows

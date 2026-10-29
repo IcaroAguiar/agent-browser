@@ -159,6 +159,8 @@ agent-browser wait --fn "window.ready"     # Wait for JS condition (or -f)
 
 After a page-changing action, prefer the selector, text, URL, or JavaScript condition that represents the result you need. Use a lifecycle wait when the lifecycle event is the milestone. `networkidle` is also supported, but use it only for pages known to become quiet because SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
+A load-state wait returns an error if its timeout expires.
+
 ## Mouse Control
 
 ```bash

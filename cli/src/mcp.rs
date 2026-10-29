@@ -996,7 +996,7 @@ fn tools() -> Vec<Value> {
         wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element to appear.", json!({ "selector": selector_schema() }), &["selector"]),
         wait_tool(TOOL_WAIT_FOR_TEXT, "Wait for text", "Wait for text to appear.", json!({ "text": { "type": "string" } }), &["text"]),
         wait_tool(TOOL_WAIT_FOR_URL, "Wait for URL", "Wait for the current URL to match a pattern.", json!({ "url": { "type": "string", "description": "URL glob or pattern." } }), &["url"]),
-        wait_tool(TOOL_WAIT_FOR_LOAD, "Wait for load state", "Wait for a page load state.", json!({ "state": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"] } }), &["state"]),
+        wait_tool(TOOL_WAIT_FOR_LOAD, "Wait for load state", "Wait for a page load state. Returns an error if its timeout expires.", json!({ "state": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"] } }), &["state"]),
         wait_tool(TOOL_WAIT_FOR_FUNCTION, "Wait for function", "Wait for a JavaScript expression to become truthy.", json!({ "expression": { "type": "string" } }), &["expression"]),
         tool(
             TOOL_SCREENSHOT,

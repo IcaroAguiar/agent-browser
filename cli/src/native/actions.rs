@@ -10111,6 +10111,7 @@ async fn handle_waitforurl(cmd: &Value, state: &DaemonState) -> Result<Value, St
     Ok(json!({ "url": url }))
 }
 
+/// Wait for a page lifecycle state and return an error when its timeout expires.
 async fn handle_waitforloadstate(cmd: &Value, state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
     let session_id = mgr.active_session_id()?.to_string();

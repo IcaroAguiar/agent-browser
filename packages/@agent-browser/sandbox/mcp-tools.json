@@ -14987,7 +14987,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Wait for a page load state.",
+      "description": "Wait for a page load state. Returns an error if its timeout expires.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
