@@ -129,7 +129,7 @@ export async function fillAndSubmitForm(
 
 ## MCP Server over stdin
 
-To keep one MCP server running for many tool calls, start `agent-browser mcp` with `startAgentBrowserMcp`. It talks to the server over the sandbox command's stdin and needs `@vercel/sandbox` 3.7 or later:
+For many MCP tool calls in one sandbox, `startAgentBrowserMcp` keeps one `agent-browser mcp` process running and sends requests over the sandbox command's stdin. It requires `@vercel/sandbox` 3.7 or later, and `timeout` (milliseconds) applies to each request and to `close()`:
 
 ```ts
 import { startAgentBrowserMcp, withAgentBrowserSandbox } from "@agent-browser/sandbox/vercel";

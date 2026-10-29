@@ -1481,7 +1481,7 @@ const result = await withAgentBrowserSandbox(async (sandbox) => {
 });
 ```
 
-To keep one MCP server running in a Vercel Sandbox, `startAgentBrowserMcp` from `@agent-browser/sandbox/vercel` starts `agent-browser mcp` and talks to it over the command's stdin, so every tool call reuses the same process:
+When an agent makes many MCP tool calls in the same Vercel Sandbox, use `startAgentBrowserMcp` from `@agent-browser/sandbox/vercel`. It starts one `agent-browser mcp` process and sends every request over that command's stdin, so tool calls reuse the process instead of starting a CLI command each time as `runAgentBrowserCommand` does:
 
 ```typescript
 import { startAgentBrowserMcp, withAgentBrowserSandbox } from "@agent-browser/sandbox/vercel";
@@ -1497,7 +1497,7 @@ const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
 });
 ```
 
-It needs `@vercel/sandbox` 3.7 or later. `timeout` applies to each request. For another runtime that exposes a process with `stdin` and `stdout` streams, use `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
+`startAgentBrowserMcp` requires `@vercel/sandbox` 3.7 or later. `timeout` is in milliseconds and applies to each request and to `close()`; without it, requests wait indefinitely. In another runtime, pass a process with `stdin` and `stdout` streams to `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
 
 Install `@agent-browser/sandbox` and `@vercel/sandbox` in the consuming app. See the [sandbox helper example](examples/sandbox/) for minimal Vercel Sandbox usage, or the [environments example](examples/environments/) for a full UI demo with a deploy-to-Vercel button.
 
