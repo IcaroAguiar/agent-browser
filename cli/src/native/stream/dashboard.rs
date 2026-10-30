@@ -860,19 +860,7 @@ async fn read_post_body(stream: &mut tokio::net::TcpStream, initial: &[u8], n: u
     };
 
     let header_str = String::from_utf8_lossy(&initial[..header_end]);
-    let content_length: usize = header_str
-        .lines()
-        .find_map(|l| {
-            if l.len() > 16 && l[..16].eq_ignore_ascii_case("content-length: ") {
-                l[16..].trim().parse::<usize>().ok()
-            } else {
-                let lower = l.to_lowercase();
-                lower
-                    .strip_prefix("content-length:")
-                    .and_then(|v| v.trim().parse::<usize>().ok())
-            }
-        })
-        .unwrap_or(0);
+    let content_length = super::http::parse_content_length(&header_str).unwrap_or(0);
 
     if content_length == 0 {
         return String::new();
