@@ -6002,9 +6002,17 @@ async fn handle_evaluate(cmd: &Value, state: &DaemonState) -> Result<Value, Stri
         .and_then(|v| v.as_str())
         .ok_or("Missing 'script' parameter")?;
 
-    let result = mgr.evaluate(script, None).await?;
+    let result = mgr.evaluate_remote_object(script).await?;
+    let unserializable = result
+        .unserializable_value
+        .clone()
+        .or_else(|| (result.object_type == "undefined").then(|| "undefined".to_string()));
     let url = mgr.get_url().await.unwrap_or_default();
-    Ok(json!({ "result": result, "origin": url }))
+    let mut data = json!({ "result": result.value.unwrap_or(Value::Null), "origin": url });
+    if let Some(token) = unserializable {
+        data["unserializable"] = json!(token);
+    }
+    Ok(data)
 }
 
 async fn handle_close(state: &mut DaemonState) -> Result<Value, String> {
