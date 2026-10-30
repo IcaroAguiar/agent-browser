@@ -11111,7 +11111,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Set geolocation.",
+      "description": "Set coordinates and grant geolocation for the active HTTP(S) origin. Other origins and permissions are unchanged.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

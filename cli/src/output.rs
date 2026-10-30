@@ -2516,7 +2516,7 @@ Configures various browser settings and emulation options.
 Settings:
   viewport <w> <h> [scale]   Set viewport size (scale = deviceScaleFactor, e.g. 2 for retina)
   device <name>              Emulate device (e.g., "iPhone 12")
-  geo <lat> <lng>            Set geolocation
+  geo <lat> <lng>            Set geolocation and grant it for the active HTTP(S) origin
   offline [on|off]           Toggle offline mode; off restores the new-tab default
   headers <json>             Set extra HTTP headers; use {} to clear them for new tabs
   credentials <user> <pass>  Set HTTP authentication for current and future tabs

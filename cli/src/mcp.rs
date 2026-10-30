@@ -1241,7 +1241,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SET_GEO,
             "Set geolocation",
-            "Set geolocation.",
+            "Set coordinates and grant geolocation for the active HTTP(S) origin. Other origins and permissions are unchanged.",
             json!({ "latitude": number_schema(), "longitude": number_schema() }),
             &["latitude", "longitude"],
         ),
