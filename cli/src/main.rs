@@ -320,6 +320,7 @@ fn should_send_local_launch_config(flags: &Flags, command: &serde_json::Value) -
         && flags.cdp.is_none()
         && flags.provider.is_none()
         && !flags.auto_connect
+        && command.get("action").and_then(|value| value.as_str()) != Some("cdp_url")
         && !command_is_external_launch(command)
 }
 
@@ -2814,6 +2815,23 @@ mod tests {
         let mut launch = json!({ "action": "launch" });
         attach_webmcp_launch_option(&mut launch, &flags);
         assert_eq!(launch["webmcp"], false);
+    }
+
+    #[test]
+    fn test_cdp_url_metadata_ignores_launch_configuration() {
+        let mut flags = neutral_launch_config_flags();
+        flags.engine = Some("chrome".to_string());
+        flags.executable_path = Some("/usr/local/bin/chromium".to_string());
+        flags.args = Some("--disable-gpu".to_string());
+
+        assert!(!should_send_local_launch_config(
+            &flags,
+            &json!({ "action": "cdp_url" })
+        ));
+        assert!(should_send_local_launch_config(
+            &flags,
+            &json!({ "action": "snapshot" })
+        ));
     }
 
     #[test]
