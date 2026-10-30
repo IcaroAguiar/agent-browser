@@ -2625,12 +2625,22 @@ fn cli_tool_args(
     // The CLI reads global flags anywhere in argv, so a tool argument such as
     // a selector could otherwise carry its own --allowed-domains or --session.
     let trusted: Vec<&str> = args.iter().map(|a| global_flag_name(a)).collect();
+    let wait_selector_state = wait_selector_state_flag_index(&command_args);
     let tokens = command_args
         .iter()
-        .map(|t| (t, MCP_TOOL_GLOBALS))
-        .chain(extra_args.iter().map(|t| (t, &[][..])));
-    for (token, tool_globals) in tokens {
+        .enumerate()
+        .map(|(i, t)| (t, MCP_TOOL_GLOBALS, Some(i)))
+        .chain(extra_args.iter().map(|t| (t, &[][..], None)));
+    for (token, tool_globals, command_index) in tokens {
         let name = global_flag_name(token);
+        if wait_selector_state.is_some() && command_index == wait_selector_state {
+            continue;
+        }
+        if command_index.is_none() && name == "--state" {
+            return Err(ProtocolError::invalid_params(
+                "Tool arguments may not set --state; configure it in the MCP server's environment or config",
+            ));
+        }
         if !crate::flags::clean_args(&[name.to_string()]).is_empty() {
             continue;
         }
@@ -2650,6 +2660,21 @@ fn cli_tool_args(
     args.extend(command_args);
     args.extend(extra_args);
     Ok(args)
+}
+
+fn wait_selector_state_flag_index(command_args: &[String]) -> Option<usize> {
+    if command_args.len() < 4
+        || command_args[0] != "wait"
+        || command_args[1].starts_with('-')
+        || command_args[2] != "--state"
+        || !matches!(
+            command_args[3].as_str(),
+            "visible" | "hidden" | "attached" | "detached"
+        )
+    {
+        return None;
+    }
+    Some(2)
 }
 
 fn global_flag_name(token: &str) -> &str {
@@ -5286,6 +5311,45 @@ mod tests {
         assert!(screenshot.is_ok());
         let extra = json!({ "extraArgs": ["--screenshot-dir", "/tmp"] });
         assert!(cli_tool_args(&extra, vec!["open".to_string()], None).is_err());
+    }
+
+    #[test]
+    fn selector_wait_state_passes_cli_tool_args_without_opening_global_state() {
+        let guard = crate::test_utils::EnvGuard::new(&[
+            "AGENT_BROWSER_ALLOWED_DOMAINS",
+            "AGENT_BROWSER_CONFIG",
+        ]);
+        guard.remove("AGENT_BROWSER_ALLOWED_DOMAINS");
+        guard.remove("AGENT_BROWSER_CONFIG");
+
+        for state in ["visible", "hidden", "attached", "detached"] {
+            let arguments = json!({"state": state, "waitTimeoutMs": 100});
+            let command_args = wait_selector_command_args(&json!({
+                "selector": "#spinner",
+                "state": state,
+                "waitTimeoutMs": 100
+            }))
+            .unwrap();
+            let args = cli_tool_args(&arguments, command_args, None).unwrap();
+            assert!(args.windows(2).any(|pair| pair == ["--state", state]));
+            let flags = crate::flags::parse_flags(&args);
+            assert_eq!(flags.state, None);
+            assert!(!flags.cli_state);
+        }
+
+        for extra_args in [
+            json!({"extraArgs": ["--state", "/tmp/auth.json"]}),
+            json!({"extraArgs": ["--state=/tmp/auth.json"]}),
+        ] {
+            let error = cli_tool_args(&extra_args, vec!["wait".into(), "#spinner".into()], None)
+                .unwrap_err();
+            assert!(error.message.contains("may not set --state"));
+        }
+
+        let operator_cli = ["--state", "/tmp/auth.json", "wait", "#spinner"].map(str::to_string);
+        let flags = crate::flags::parse_flags(&operator_cli);
+        assert_eq!(flags.state.as_deref(), Some("/tmp/auth.json"));
+        assert!(flags.cli_state);
     }
 
     #[test]
