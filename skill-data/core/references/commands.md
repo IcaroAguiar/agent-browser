@@ -158,6 +158,8 @@ agent-browser wait --load networkidle      # Wait for network idle on known-quie
 agent-browser wait --fn "window.ready"     # Wait for JS condition (or -f)
 ```
 
+For selector waits, `--state` accepts `visible`, `hidden`, `attached`, or `detached` and cannot be combined with URL, load, function, text, download, or millisecond wait modes. The global auth-state `--state <path>` remains available before `wait`, as it does before other commands.
+
 After a page-changing action, prefer the selector, text, URL, or JavaScript condition that represents the result you need. Use a lifecycle wait when the lifecycle event is the milestone. `networkidle` is also supported, but use it only for pages known to become quiet because SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
 ## Mouse Control

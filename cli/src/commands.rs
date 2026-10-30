@@ -329,6 +329,7 @@ fn parse_cookie_header(header: &str) -> Result<Vec<Value>, String> {
 }
 
 /// Parses command arguments into normalized command data.
+/// Wait selector `--state` values are accepted only for selector waits.
 pub fn parse_command(args: &[String], flags: &Flags) -> Result<Value, ParseError> {
     let mut result = parse_command_inner(args, flags)?;
 
