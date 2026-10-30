@@ -97,7 +97,7 @@ agent-browser get value @e1       # Get input value
 agent-browser get attr @e1 href   # Get attribute
 agent-browser get title           # Get page title
 agent-browser get url             # Get current URL
-agent-browser get cdp-url         # Get CDP WebSocket URL
+agent-browser get cdp-url         # CDP WebSocket URL of a running browser (never launches)
 agent-browser get count ".item"   # Count matching elements
 agent-browser get box @e1         # Get bounding box
 agent-browser get styles @e1      # Get computed styles (font, color, bg, etc.)

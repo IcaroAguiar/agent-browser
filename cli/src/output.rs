@@ -2372,7 +2372,8 @@ Subcommands:
   count <selector>           Count matching elements
   box <selector>             Get bounding box (x, y, width, height)
   styles <selector>          Get computed styles of elements
-  cdp-url                    Get Chrome DevTools Protocol WebSocket URL
+  cdp-url                    Get CDP WebSocket URL of a running browser
+                             Never launches a browser
 
 Global Options:
   --json               Output as JSON

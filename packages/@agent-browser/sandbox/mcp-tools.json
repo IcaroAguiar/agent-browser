@@ -4850,7 +4850,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Get the current browser CDP URL.",
+      "description": "Get the CDP WebSocket URL of a running browser. Never launches a browser.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
