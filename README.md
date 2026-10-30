@@ -659,7 +659,7 @@ Full parity MCP client config:
 }
 ```
 
-Tool invocations use the same config files and environment variables as the CLI. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
+Tool invocations use the same config files and environment variables as the CLI, including proxy settings. Use `session` in the tool arguments, or set `AGENT_BROWSER_SESSION`, to isolate browser state.
 
 ## Authentication
 
@@ -1065,7 +1065,7 @@ This is useful for multimodal AI models that can reason about visual layout, unl
 | `--enable <feature>` | Built-in init scripts: `react-devtools` (repeatable or comma-list; or `AGENT_BROWSER_ENABLE` env) |
 | `--args <args>` | Browser launch args, newline separated, or comma separated before another flag. Commas inside a value such as `--disable-features=A,B` are kept (or `AGENT_BROWSER_ARGS` env) |
 | `--user-agent <ua>` | Custom User-Agent string (or `AGENT_BROWSER_USER_AGENT` env) |
-| `--proxy <url>` | Proxy server URL with optional auth (or `AGENT_BROWSER_PROXY` env) |
+| `--proxy <url>` | Proxy server URL with optional auth. When launching Chrome, agent-browser accepts a proxy URL with a trailing slash (or `AGENT_BROWSER_PROXY` env) |
 | `--proxy-bypass <hosts>` | Hosts to bypass proxy (or `AGENT_BROWSER_PROXY_BYPASS` env) |
 | `--ignore-https-errors` | Ignore HTTPS certificate errors (useful for self-signed certs) |
 | `--ca-cert <path>` | Trust a CA certificate or PEM bundle for the CLI's own HTTPS requests on every platform, and for locally launched Chromium on Linux; later commands in the same running session retain it when omitted (or `AGENT_BROWSER_CA_CERT` env) |

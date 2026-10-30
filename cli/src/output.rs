@@ -4077,6 +4077,7 @@ Options:
                              e.g., --args "--no-sandbox,--disable-features=Translate,HttpsUpgrades"
   --user-agent <ua>          Custom User-Agent (or AGENT_BROWSER_USER_AGENT)
   --proxy <server>           Proxy server URL (or AGENT_BROWSER_PROXY, HTTP_PROXY, HTTPS_PROXY, ALL_PROXY)
+                             When launching Chrome, agent-browser accepts a proxy URL with a trailing slash.
                              Supports authenticated proxies: --proxy "http://user:pass@127.0.0.1:7890"
   --proxy-bypass <hosts>     Bypass proxy for these hosts (or AGENT_BROWSER_PROXY_BYPASS, NO_PROXY)
                              e.g., --proxy-bypass "localhost,*.internal.com"

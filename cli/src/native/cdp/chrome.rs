@@ -331,6 +331,7 @@ fn maybe_start_xvfb(options: &LaunchOptions) -> Option<XvfbServer> {
 pub struct LaunchOptions {
     pub headless: bool,
     pub executable_path: Option<String>,
+    /// Chrome proxy address; trailing slashes are removed when launching.
     pub proxy: Option<String>,
     pub proxy_bypass: Option<String>,
     pub proxy_username: Option<String>,
@@ -2072,6 +2073,27 @@ exec sleep 60
 
         let result = find_playwright_chromium();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_build_args_proxy_and_bypass() {
+        for proxy in ["http://proxy.example:8080", "http://proxy.example:8080/"] {
+            let opts = LaunchOptions {
+                proxy: Some(proxy.to_string()),
+                proxy_bypass: Some("localhost,*.example.com".to_string()),
+                ..Default::default()
+            };
+            let result = build_chrome_args(&opts).unwrap();
+            assert!(result
+                .args
+                .iter()
+                .any(|arg| arg == "--proxy-server=http://proxy.example:8080"));
+            assert!(result
+                .args
+                .iter()
+                .any(|arg| arg == "--proxy-bypass-list=localhost,*.example.com"));
+            std::fs::remove_dir_all(result.temp_user_data_dir.unwrap()).unwrap();
+        }
     }
 
     #[test]
