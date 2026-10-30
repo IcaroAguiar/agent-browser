@@ -997,6 +997,8 @@ Surviving DOM elements keep their refs across snapshots. Take a fresh snapshot a
 
 Use filters to reduce snapshot output:
 
+Compact snapshots (`-c`) keep visible text and status text. Interactive snapshots (`-i`) filter out noninteractive content. For MCP snapshots, `interactive` defaults to `true`; set `interactive: false` to retain visible text and status text.
+
 ```bash
 agent-browser snapshot                    # Full accessibility tree
 agent-browser snapshot -i                 # Interactive elements only (buttons, inputs, links)

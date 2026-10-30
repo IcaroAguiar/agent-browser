@@ -1534,11 +1534,18 @@ mod tests {
 
     #[test]
     fn test_compact_tree_basic() {
-        let tree = "- navigation\n  - link \"Home\" [ref=e1]\n  - link \"About\" [ref=e2]\n- main\n  - heading \"Title\"\n  - paragraph\n    - text: Hello\n";
+        let tree = "- navigation\n  - link \"Home\" [ref=e1]\n  - link \"About\" [ref=e2]\n- main\n  - heading \"Title\"\n  - paragraph\n    - text: Hello\n- status\n  - StaticText \"Saved successfully\"\n- empty\n  - paragraph\n";
         let result = compact_tree(tree, false);
         assert!(result.contains("[ref=e1]"));
         assert!(result.contains("[ref=e2]"));
         assert!(result.contains("Hello"));
+        assert!(result.contains("- status\n  - StaticText \"Saved successfully\""));
+        assert!(!result.contains("- empty"));
+
+        let interactive = compact_tree(tree, true);
+        assert!(!interactive.contains("Saved successfully"));
+        assert!(interactive.contains("[ref=e1]"));
+        assert!(interactive.contains("Hello"));
     }
 
     #[test]

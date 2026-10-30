@@ -11954,7 +11954,7 @@
           },
           "compact": {
             "default": false,
-            "description": "Remove empty structural elements.",
+            "description": "Remove empty structural elements. With interactive:false, retain visible text.",
             "type": "boolean"
           },
           "delta": {
