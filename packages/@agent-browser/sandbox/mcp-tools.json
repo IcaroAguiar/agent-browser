@@ -7048,7 +7048,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Scroll with the mouse wheel.",
+      "description": "Scroll with the mouse wheel at the current pointer.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
