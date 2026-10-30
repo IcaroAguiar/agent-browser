@@ -2959,7 +2959,13 @@ fn call_wait_ms(arguments: &Value) -> Result<Value, ProtocolError> {
 }
 
 fn wait_selector_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
-    let mut args = vec!["wait".to_string(), required_string(arguments, "selector")?];
+    let selector = required_string(arguments, "selector")?;
+    if selector.parse::<u64>().is_ok() {
+        return Err(ProtocolError::invalid_params(
+            "A bare integer selector is treated as a millisecond wait. Use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.",
+        ));
+    }
+    let mut args = vec!["wait".to_string(), selector];
     if let Some(state) = optional_string(arguments, "state")? {
         args.extend(["--state".to_string(), state]);
     }
