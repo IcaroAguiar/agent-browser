@@ -737,6 +737,28 @@ fn parse_command_inner(args: &[String], flags: &Flags) -> Result<Value, ParseErr
                 element_state = Some(*raw);
                 rest.drain(idx..=idx + 1);
             }
+            let uses_non_selector_wait =
+                rest.iter().any(|arg| {
+                    matches!(
+                        *arg,
+                        "--url"
+                            | "-u"
+                            | "--load"
+                            | "-l"
+                            | "--fn"
+                            | "-f"
+                            | "--text"
+                            | "-t"
+                            | "--download"
+                            | "-d"
+                    )
+                }) || rest.first().is_some_and(|arg| arg.parse::<u64>().is_ok());
+            if element_state.is_some() && uses_non_selector_wait {
+                return Err(ParseError::InvalidValue {
+                    message: "--state can only be used with a selector wait".to_string(),
+                    usage: "wait <selector> --state <visible|hidden|attached|detached>",
+                });
+            }
             let with_timeout = |mut cmd: Value| {
                 if let Some(ms) = timeout_ms {
                     cmd["timeout"] = json!(ms);
@@ -5073,6 +5095,23 @@ mod tests {
             parse_command(&args("wait #spinner --state gone"), &default_flags()),
             Err(ParseError::InvalidValue { .. })
         ));
+    }
+
+    #[test]
+    fn test_wait_selector_state_rejects_non_selector_waits() {
+        for command in [
+            "wait --url **/dashboard --state hidden",
+            "wait --load networkidle --state hidden",
+            "wait --fn true --state hidden",
+            "wait --text Ready --state hidden",
+            "wait --download --state hidden",
+            "wait 1000 --state hidden",
+        ] {
+            assert!(matches!(
+                parse_command(&args(command), &default_flags()),
+                Err(ParseError::InvalidValue { .. })
+            ));
+        }
     }
 
     #[test]

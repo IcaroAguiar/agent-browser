@@ -993,7 +993,7 @@ fn tools() -> Vec<Value> {
         ),
         tool(TOOL_SCROLL_INTO_VIEW, "Scroll into view", "Scroll an element into view.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_WAIT_MS, "Wait milliseconds", "Wait for a fixed time.", json!({ "ms": { "type": "integer", "minimum": 0 } }), &["ms"]),
-        wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element with a CSS selector or @ref to reach a state. Bare integers are treated as millisecond waits; use CSS selector syntax for numeric IDs.", json!({
+        wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element with a CSS selector or @ref to reach a state. Bare integer selectors are rejected; use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.", json!({
             "selector": selector_schema(),
             "state": {
                 "type": "string",
@@ -2962,7 +2962,7 @@ fn wait_selector_command_args(arguments: &Value) -> Result<Vec<String>, Protocol
     let selector = required_string(arguments, "selector")?;
     if selector.parse::<u64>().is_ok() {
         return Err(ProtocolError::invalid_params(
-            "A bare integer selector is treated as a millisecond wait. Use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.",
+            "Bare integer selectors are rejected. Use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.",
         ));
     }
     let mut args = vec!["wait".to_string(), selector];
@@ -2983,7 +2983,7 @@ fn call_wait_flag(
     let value = required_string(arguments, value_key)?;
     if flag.is_none() && value.parse::<u64>().is_ok() {
         return Err(ProtocolError::invalid_params(
-            "A bare integer selector is treated as a millisecond wait. Use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.",
+            "Bare integer selectors are rejected. Use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.",
         ));
     }
     let mut args = vec!["wait".to_string()];
@@ -4559,7 +4559,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, -32602);
-        assert!(error.message.contains("millisecond wait"));
+        assert!(error.message.contains("Bare integer selectors are rejected"));
     }
 
     #[cfg(unix)]
@@ -4611,6 +4611,10 @@ mod tests {
             selector_tool["inputSchema"]["required"],
             json!(["selector"])
         );
+        assert!(selector_tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("Bare integer selectors are rejected"));
 
         let with_state = wait_selector_command_args(&json!({
             "selector": "#target",
