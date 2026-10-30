@@ -69,6 +69,7 @@ fn assert_error_code(resp: &Value, code: &str) {
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
+        "wheel_probe" => include_str!("test_fixtures/wheel_probe.html"),
         "html5_drag_probe" => include_str!("test_fixtures/html5_drag_probe.html"),
         "pointer_capture_probe" => include_str!("test_fixtures/pointer_capture_probe.html"),
         "snapshot_diff_probe" => include_str!("test_fixtures/snapshot_diff_probe.html"),
@@ -3502,6 +3503,84 @@ async fn e2e_hover_scroll_press() {
 // ---------------------------------------------------------------------------
 // Raw mouse regressions
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_mouse_wheel_uses_last_pointer_coordinates() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "2",
+            "action": "navigate",
+            "url": native_test_fixture_url("wheel_probe")
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({
+            "id": "3",
+            "action": "evaluate",
+            "script": r#"(() => {
+                const rect = document.getElementById('target').getBoundingClientRect();
+                return {
+                    x: Math.round(rect.left + rect.width / 2),
+                    y: Math.round(rect.top + rect.height / 2)
+                };
+            })()"#
+        }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let target = &get_data(&resp)["result"];
+    let x = target["x"].as_i64().expect("target x should be numeric");
+    let y = target["y"].as_i64().expect("target y should be numeric");
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "mousemove", "x": x, "y": y }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "5", "action": "wheel", "deltaX": -12.5, "deltaY": 37.25 }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["deltaX"], -12.5);
+    assert_eq!(get_data(&resp)["deltaY"], 37.25);
+
+    let resp = execute_command(
+        &json!({ "id": "6", "action": "evaluate", "script": "({ last: window.__wheelProbe, events: window.__wheelEvents })" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let probe = &get_data(&resp)["result"];
+    assert_eq!(probe["events"].as_array().map(Vec::len), Some(1), "{probe}");
+    let wheel = &probe["last"];
+    assert_eq!(wheel["target"], "target", "wheel probe: {wheel}");
+    assert_eq!(wheel["x"].as_i64(), Some(x));
+    assert_eq!(wheel["y"].as_i64(), Some(y));
+    assert_eq!(wheel["deltaX"].as_f64(), Some(-12.5));
+    assert_eq!(wheel["deltaY"].as_f64(), Some(37.25));
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
 
 #[tokio::test]
 #[ignore]
