@@ -350,7 +350,9 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 pub(super) fn parse_content_length(headers: &str) -> Option<usize> {
-    request_header_value(headers, "content-length")?.parse().ok()
+    request_header_value(headers, "content-length")?
+        .parse()
+        .ok()
 }
 
 fn parse_content_length_bytes(headers: &[u8]) -> Option<usize> {
