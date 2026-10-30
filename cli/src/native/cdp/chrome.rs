@@ -523,7 +523,13 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     }
 
     if let Some(ref proxy) = options.proxy {
-        args.push(format!("--proxy-server={}", proxy.trim_end_matches('/')));
+        let trimmed = proxy.trim_end_matches('/');
+        let server = if trimmed.is_empty() {
+            proxy.as_str()
+        } else {
+            trimmed
+        };
+        args.push(format!("--proxy-server={}", server));
     }
 
     if let Some(ref bypass) = options.proxy_bypass {
@@ -2077,17 +2083,26 @@ exec sleep 60
 
     #[test]
     fn test_build_args_proxy_and_bypass() {
-        for proxy in ["http://proxy.example:8080", "http://proxy.example:8080/"] {
+        for (proxy, expected) in [
+            ("/", "--proxy-server=/"),
+            ("///", "--proxy-server=///"),
+            ("", "--proxy-server="),
+            (
+                "http://proxy.example:8080",
+                "--proxy-server=http://proxy.example:8080",
+            ),
+            (
+                "http://proxy.example:8080/",
+                "--proxy-server=http://proxy.example:8080",
+            ),
+        ] {
             let opts = LaunchOptions {
                 proxy: Some(proxy.to_string()),
                 proxy_bypass: Some("localhost,*.example.com".to_string()),
                 ..Default::default()
             };
             let result = build_chrome_args(&opts).unwrap();
-            assert!(result
-                .args
-                .iter()
-                .any(|arg| arg == "--proxy-server=http://proxy.example:8080"));
+            assert!(result.args.iter().any(|arg| arg == expected));
             assert!(result
                 .args
                 .iter()
