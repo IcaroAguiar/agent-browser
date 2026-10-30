@@ -6,6 +6,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 
 use crate::color;
 
@@ -94,7 +96,29 @@ fn bundled_skills_dir(cache_dir: Option<PathBuf>, temp_dir: PathBuf) -> Option<P
     };
     cache_dir
         .and_then(|root| materialize_embedded_skills(&skills_path(&root)))
-        .or_else(|| materialize_embedded_skills(&skills_path(&temp_dir)))
+        .or_else(|| materialize_private_temp_skills(&temp_dir))
+}
+
+fn materialize_private_temp_skills(temp_dir: &Path) -> Option<PathBuf> {
+    let mut random = [0; 16];
+    getrandom::getrandom(&mut random).ok()?;
+    let private_root = temp_dir.join(format!(
+        "agent-browser-{}-{}",
+        env!("CARGO_PKG_VERSION"),
+        hex::encode(random)
+    ));
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(&private_root).ok()?;
+
+    let skills_dir = private_root.join("skills");
+    if let Some(skills_dir) = materialize_embedded_skills(&skills_dir) {
+        Some(skills_dir)
+    } else {
+        let _ = fs::remove_dir_all(private_root);
+        None
+    }
 }
 
 /// Locate the package root that contains the skill directories.
@@ -131,7 +155,8 @@ fn find_package_root() -> Option<PathBuf> {
     None
 }
 
-/// Collect all skill directories to search, respecting the env var override.
+/// Collect skill directories to search, respecting the env var override.
+/// Uses bundled core files when package discovery cannot provide them.
 fn find_skills_dirs() -> Vec<PathBuf> {
     // Env var override: single directory, used as-is
     if let Ok(dir) = env::var("AGENT_BROWSER_SKILLS_DIR") {
@@ -567,6 +592,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn materializes_bundled_core_skill_files() {
@@ -583,19 +610,25 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_temp_when_cache_cannot_be_materialized() {
+    fn temp_fallback_uses_a_fresh_private_directory() {
         let temp_dir = tempfile::tempdir().unwrap();
         let cache_root = temp_dir.path().join("cache");
         fs::write(&cache_root, "unusable").unwrap();
-        let fallback_root = temp_dir.path().join("temp");
-        let expected = fallback_root
-            .join("agent-browser")
-            .join(env!("CARGO_PKG_VERSION"))
-            .join("skills");
+        let skills_dir = bundled_skills_dir(Some(cache_root.clone()), temp_dir.path().to_path_buf())
+            .unwrap();
+        let another_skills_dir = bundled_skills_dir(Some(cache_root), temp_dir.path().to_path_buf())
+            .unwrap();
 
-        let skills_dir = bundled_skills_dir(Some(cache_root), fallback_root).unwrap();
-
-        assert_eq!(skills_dir, expected);
+        assert_ne!(skills_dir, another_skills_dir);
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(skills_dir.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         for file in [
             "core/SKILL.md",
             "core/references/commands.md",
