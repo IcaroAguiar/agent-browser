@@ -3236,19 +3236,27 @@ async fn e2e_wait_network_idle_reports_timeout_on_busy_page() {
     .await;
     assert_success(&resp);
 
+    let started = std::time::Instant::now();
     let wait_resp = execute_command(
         &json!({ "id": "3", "action": "waitforloadstate", "state": "networkidle", "timeout": 30000 }),
         &mut state,
     )
     .await;
+    let waited = started.elapsed();
     let close_resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
     server.abort();
     assert_success(&close_resp);
     assert_eq!(wait_resp["success"], false, "{wait_resp}");
+    // The requested budget is the one that counts. The inner wait used to stop
+    // at the browser's hardcoded 25s default, so a 30s wait failed early.
     assert!(
-        wait_resp["error"]
-            .as_str()
-            .is_some_and(|error| error.to_ascii_lowercase().contains("timed out")),
+        waited >= std::time::Duration::from_millis(28_000),
+        "network-idle wait returned after {waited:?}, expected to use the 30000ms budget"
+    );
+    assert!(
+        wait_resp["error"].as_str().is_some_and(|error| {
+            error.contains("Timed out after 30000ms") && error.contains("load state 'networkidle'")
+        }),
         "expected the network-idle timeout error: {}",
         serde_json::to_string_pretty(&wait_resp).unwrap_or_default()
     );

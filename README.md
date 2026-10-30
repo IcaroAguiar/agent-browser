@@ -279,7 +279,7 @@ agent-browser wait "#spinner" --state hidden
 
 **Load states:** `load`, `domcontentloaded`, `networkidle`
 
-A load-state wait returns an error if its timeout expires.
+A load-state wait runs for its whole timeout budget, taken from `--timeout` or `AGENT_BROWSER_DEFAULT_TIMEOUT`, and returns an error when it expires.
 
 After a page change, prefer a selector, text, URL, or JavaScript condition that represents the state you need. Use `load` or `domcontentloaded` when the lifecycle event is the milestone. `networkidle` is supported for pages known to become quiet, but SSE, WebSockets, polling, and long-polling can keep it from resolving.
 
