@@ -3183,6 +3183,12 @@ Usage: agent-browser install [--with-deps]
 
 Downloads and installs browser binaries required for automation.
 
+On macOS versions below 13, the command stops before downloading Chrome for
+Testing and prints instructions to update macOS or install Chrome manually. If
+`sw_vers -productVersion` is unavailable, exits with an error, returns no
+version, or returns a malformed version, the command reports a detection error
+and stops before making a network request.
+
 Options:
   -d, --with-deps      Also install system dependencies (Linux only; fails if deps fail)
 
