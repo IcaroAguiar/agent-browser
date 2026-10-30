@@ -5898,12 +5898,8 @@ mod tests {
         let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
         env.set("AGENT_BROWSER_SESSION", "has space");
 
-        let err = call_cli_tool(
-            &json!({"extraArgs": ["--session=valid"]}),
-            Vec::new(),
-            None,
-        )
-        .unwrap_err();
+        let err = call_cli_tool(&json!({"extraArgs": ["--session=valid"]}), Vec::new(), None)
+            .unwrap_err();
 
         assert_eq!(err.code, -32602);
         assert_eq!(
