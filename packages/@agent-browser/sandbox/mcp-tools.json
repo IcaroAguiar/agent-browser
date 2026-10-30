@@ -11634,7 +11634,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get bundled skill content.",
+      "description": "Get skill content by name. Standalone and Cargo-installed binaries include core; set full to include its references and templates.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -11742,7 +11742,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List bundled skills.",
+      "description": "List skills available to this installation.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
