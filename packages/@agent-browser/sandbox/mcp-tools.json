@@ -13702,6 +13702,8 @@
             "type": "string"
           },
           "label": {
+            "description": "Starts with an ASCII letter, then ASCII letters, digits, `-`, or `_`; `t<N>` and `T<N>` forms are reserved for tab IDs.",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
             "type": "string"
           },
           "namespace": {

@@ -399,6 +399,8 @@ Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused wi
 
 You can also assign a memorable label (`docs`, `app`, `admin`) and use it interchangeably with the id. Labels are never auto-generated and never rewritten on navigation — they're yours to name and keep:
 
+A label starts with a letter and contains only letters, digits, `-`, or `_`. Labels must be unique within a session and cannot use the reserved `t<N>` or `T<N>` tab-id form.
+
 ```bash
 agent-browser tab new --label docs https://docs.example.com
 agent-browser tab docs               # switch to the docs tab
