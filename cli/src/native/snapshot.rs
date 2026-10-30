@@ -1091,7 +1091,10 @@ fn build_tree(nodes: &[AXNode]) -> (Vec<TreeNode>, Vec<usize>) {
     let mut id_to_idx: HashMap<String, usize> = HashMap::new();
 
     for (i, node) in nodes.iter().enumerate() {
-        let role = extract_ax_string(&node.role);
+        let mut role = extract_ax_string(&node.role);
+        if role == "IframePresentational" {
+            role = "Iframe".to_string();
+        }
         let name = extract_ax_string(&node.name);
         let value_text = extract_ax_string_opt(&node.value);
 
