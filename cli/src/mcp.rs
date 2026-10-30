@@ -4559,7 +4559,9 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, -32602);
-        assert!(error.message.contains("Bare integer selectors are rejected"));
+        assert!(error
+            .message
+            .contains("Bare integer selectors are rejected"));
     }
 
     #[cfg(unix)]
