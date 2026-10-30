@@ -88,6 +88,22 @@ fn parse_idle_timeout_value(value: Option<String>, source: &str) -> Option<Strin
     })
 }
 
+/// Parse max-output with usize's existing syntax and warn when the value is invalid.
+fn parse_max_output_value(value: &str, source: &str) -> Option<usize> {
+    match value.parse::<usize>() {
+        Ok(limit) => Some(limit),
+        Err(_) => {
+            eprintln!(
+                "{} Invalid {} value: {}",
+                color::warning_indicator(),
+                source,
+                value
+            );
+            None
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
@@ -685,7 +701,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             || config.content_boundaries.unwrap_or(false),
         max_output: env::var("AGENT_BROWSER_MAX_OUTPUT")
             .ok()
-            .and_then(|s| s.parse().ok())
+            .and_then(|value| parse_max_output_value(&value, "AGENT_BROWSER_MAX_OUTPUT"))
             .or(config.max_output),
         allowed_domains: env::var("AGENT_BROWSER_ALLOWED_DOMAINS")
             .ok()
@@ -1087,7 +1103,7 @@ pub fn parse_flags(args: &[String]) -> Flags {
             }
             "--max-output" => {
                 if let Some(s) = args.get(i + 1) {
-                    if let Ok(n) = s.parse::<usize>() {
+                    if let Some(n) = parse_max_output_value(s, "--max-output") {
                         flags.max_output = Some(n);
                     }
                     i += 1;

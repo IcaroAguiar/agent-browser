@@ -841,7 +841,7 @@ fn tools() -> Vec<Value> {
         tool(
             TOOL_OPEN,
             "Open page",
-            "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools.",
+            "Launch the browser and optionally navigate to a URL. On Windows, owned headless Chrome uses a private desktop and its process tree closes with the daemon, including forced termination. Headed browsers use the interactive desktop. Successful navigation responses include WebMCP availability metadata when the page exposes allowed tools. Browser-provider and launch-mutation errors omit response error text and unsupported protocol values.",
             json!({
                 "url": { "type": "string", "description": "URL to open. Omit to launch about:blank." },
                 "headed": { "type": "boolean", "description": "Show the browser window. Explicit true/false overrides AGENT_BROWSER_HEADED and config; omit to use those defaults." },
@@ -993,7 +993,13 @@ fn tools() -> Vec<Value> {
         ),
         tool(TOOL_SCROLL_INTO_VIEW, "Scroll into view", "Scroll an element into view.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_WAIT_MS, "Wait milliseconds", "Wait for a fixed time.", json!({ "ms": { "type": "integer", "minimum": 0 } }), &["ms"]),
-        wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element to appear.", json!({ "selector": selector_schema() }), &["selector"]),
+        wait_tool(
+            TOOL_WAIT_FOR_SELECTOR,
+            "Wait for selector",
+            "Wait for an element with a CSS selector or @ref. Bare integers are rejected because they are treated as millisecond waits; use CSS selector syntax for numeric IDs.",
+            json!({ "selector": selector_schema() }),
+            &["selector"],
+        ),
         wait_tool(TOOL_WAIT_FOR_TEXT, "Wait for text", "Wait for text to appear.", json!({ "text": { "type": "string" } }), &["text"]),
         wait_tool(TOOL_WAIT_FOR_URL, "Wait for URL", "Wait for the current URL to match a pattern.", json!({ "url": { "type": "string", "description": "URL glob or pattern." } }), &["url"]),
         wait_tool(TOOL_WAIT_FOR_LOAD, "Wait for load state", "Wait for a page load state.", json!({ "state": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"] } }), &["state"]),
@@ -1575,7 +1581,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_AUTH_LOGIN,
             "Auth login",
-            "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting.",
+            "Log in with a saved auth profile. Control selection checks layout size, computed visibility and opacity, and disabled/readonly state. Replaced or focus-redirected credential fields fail without submitting. Credential-provider errors omit response error text and unsupported protocol values.",
             json!({
                 "name": { "type": "string" },
                 "noNavigate": {
@@ -2955,6 +2961,11 @@ fn call_wait_flag(
     value_key: &str,
 ) -> Result<Value, ProtocolError> {
     let value = required_string(arguments, value_key)?;
+    if flag.is_none() && value.parse::<u64>().is_ok() {
+        return Err(ProtocolError::invalid_params(
+            "A bare integer selector is treated as a millisecond wait. Use CSS selector syntax for numeric IDs or agent_browser_wait_ms for a delay.",
+        ));
+    }
     let mut args = vec!["wait".to_string()];
     if let Some(flag) = flag {
         args.push(flag.to_string());
@@ -3303,7 +3314,7 @@ fn call_cookies_set(arguments: &Value) -> Result<Value, ProtocolError> {
         ("url", "--url"),
         ("domain", "--domain"),
         ("path", "--path"),
-        ("sameSite", "--sameSite"),
+        ("sameSite", "--same-site"),
     ] {
         if let Some(value) = optional_string(arguments, key)? {
             args.push(flag.to_string());
@@ -3315,7 +3326,7 @@ fn call_cookies_set(arguments: &Value) -> Result<Value, ProtocolError> {
         args.push(value.to_string());
     }
     if optional_bool(arguments, "httpOnly")?.unwrap_or(false) {
-        args.push("--httpOnly".to_string());
+        args.push("--http-only".to_string());
     }
     if optional_bool(arguments, "secure")?.unwrap_or(false) {
         args.push("--secure".to_string());
@@ -4516,6 +4527,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn wait_for_selector_rejects_integer_at_mcp_boundary() {
+        let error = call_tool(
+            Some(&json!({
+                "name": TOOL_WAIT_FOR_SELECTOR,
+                "arguments": { "selector": "7", "waitTimeoutMs": 100 }
+            })),
+            &McpConfig::all(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("millisecond wait"));
+    }
 
     #[cfg(unix)]
     #[test]
