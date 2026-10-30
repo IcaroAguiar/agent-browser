@@ -2292,7 +2292,7 @@ agent-browser eval - Execute JavaScript
 Usage: agent-browser eval [options] <script>
 
 Executes JavaScript code in the browser context and returns the result.
-For Chrome values JSON cannot represent, plain output prints the JavaScript token and JSON output includes data.unserializable.
+For a top-level Chrome result JSON cannot represent, plain output prints its JavaScript token and JSON output includes data.unserializable.
 
 Options:
   -b, --base64         Decode script from base64 (avoids shell escaping issues)

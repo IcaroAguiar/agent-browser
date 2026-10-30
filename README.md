@@ -157,7 +157,7 @@ agent-browser chat "<instruction>"    # AI chat: natural language browser contro
 agent-browser chat                    # AI chat: interactive REPL mode
 ```
 
-Without `--json`, Chrome/CDP `eval` output prints values JSON cannot represent as their exact JavaScript tokens, including `NaN`, `Infinity`, `-Infinity`, `-0`, BigInt literals, and `undefined`. With `--json`, `data.result` stays `null` and sibling `data.unserializable` contains the token. MCP text prints the token, and structured responses expose it at `structuredContent.response.data.unserializable`.
+When the top-level Chrome/CDP `eval` result is a value JSON cannot represent, plain output prints its exact JavaScript token, including `NaN`, `Infinity`, `-Infinity`, `-0`, BigInt literals, and `undefined`. With `--json`, `data.result` stays `null` and sibling `data.unserializable` contains the token. MCP text prints the token, and structured responses expose it at `structuredContent.response.data.unserializable`.
 
 ### WebMCP (experimental)
 
