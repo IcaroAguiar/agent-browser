@@ -9295,7 +9295,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Inspect React tree.",
+      "description": "Inspect the React component tree and return its structured result.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

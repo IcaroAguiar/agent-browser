@@ -501,7 +501,7 @@ Requires `--enable react-devtools` at launch for the `react ...` commands. `vita
 
 ```bash
 agent-browser open --enable react-devtools <url>    # Launch with React hook installed
-agent-browser react tree                            # Full component tree
+agent-browser react tree                            # Print the component tree
 agent-browser react inspect <fiberId>               # Props, hooks, state, source
 agent-browser react renders start                   # Begin re-render recording
 agent-browser react renders stop [--json]           # Stop and print render profile
@@ -510,6 +510,8 @@ agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + 
 agent-browser vitals [url] [--json]                 # LCP/CLS/TTFB/FCP/INP + hydration
 agent-browser pushstate <url>                       # SPA client-side nav (auto-detects Next router)
 ```
+
+`react tree` prints the component tree when one is available. If the response contains only a header, no tree was collected. Confirm the page uses React and that a React root has mounted.
 
 `vitals` prints a summary by default and uses the same fields as the structured `--json` response.
 
