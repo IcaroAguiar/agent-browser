@@ -3,11 +3,11 @@ use std::env;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(unix)]
-use std::os::unix::fs::DirBuilderExt;
 
 use crate::color;
 
@@ -614,10 +614,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let cache_root = temp_dir.path().join("cache");
         fs::write(&cache_root, "unusable").unwrap();
-        let skills_dir = bundled_skills_dir(Some(cache_root.clone()), temp_dir.path().to_path_buf())
-            .unwrap();
-        let another_skills_dir = bundled_skills_dir(Some(cache_root), temp_dir.path().to_path_buf())
-            .unwrap();
+        let skills_dir =
+            bundled_skills_dir(Some(cache_root.clone()), temp_dir.path().to_path_buf()).unwrap();
+        let another_skills_dir =
+            bundled_skills_dir(Some(cache_root), temp_dir.path().to_path_buf()).unwrap();
 
         assert_ne!(skills_dir, another_skills_dir);
         #[cfg(unix)]
