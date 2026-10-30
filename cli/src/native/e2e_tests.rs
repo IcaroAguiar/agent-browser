@@ -66,6 +66,76 @@ fn assert_error_code(resp: &Value, code: &str) {
     assert_eq!(resp.get("code").and_then(Value::as_str), Some(code));
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_empty_table_cell_refs_resolve() {
+    let html = r#"<!doctype html><table role="table"><tbody><tr>
+<td role="cell" id="empty-cell"></td>
+<td role="cell" id="named-cell">Named cell</td>
+<td role="cell" id="nbsp-cell">&nbsp;</td>
+<th role="columnheader" id="empty-columnheader"></th>
+<th role="rowheader" id="empty-rowheader"></th>
+</tr></tbody></table><div role="grid"><div role="row"><div role="gridcell" id="empty-gridcell"></div></div></div>"#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let refs = get_data(&resp)["refs"]
+        .as_object()
+        .expect("snapshot refs should be an object");
+    let mut resolved = Vec::new();
+    for (reference, metadata) in refs {
+        let role = metadata["role"].as_str().unwrap_or_default();
+        if ["cell", "gridcell", "columnheader", "rowheader"].contains(&role) {
+            let resp = execute_command(
+                &json!({
+                    "id": format!("resolve-{reference}"),
+                    "action": "getattribute",
+                    "selector": format!("@{reference}"),
+                    "attribute": "id"
+                }),
+                &mut state,
+            )
+            .await;
+            assert_success(&resp);
+            resolved.push((
+                get_data(&resp)["value"].as_str().unwrap().to_string(),
+                role.to_string(),
+            ));
+        }
+    }
+    resolved.sort();
+    assert_eq!(
+        resolved,
+        [
+            ("empty-cell".to_string(), "cell".to_string()),
+            ("empty-columnheader".to_string(), "columnheader".to_string()),
+            ("empty-gridcell".to_string(), "gridcell".to_string()),
+            ("empty-rowheader".to_string(), "rowheader".to_string()),
+            ("named-cell".to_string(), "cell".to_string()),
+            ("nbsp-cell".to_string(), "cell".to_string()),
+        ]
+    );
+
+    let resp = execute_command(&json!({ "id": "close", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
 fn native_test_fixture_html(name: &str) -> &'static str {
     match name {
         "drag_probe" => include_str!("test_fixtures/drag_probe.html"),
