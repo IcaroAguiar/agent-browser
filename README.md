@@ -339,6 +339,8 @@ agent-browser set credentials <u> <p> # HTTP basic auth for current and future t
 agent-browser set media [dark|light]  # Emulate color scheme
 ```
 
+On a loaded HTTP(S) page in Chrome, `set geo` grants geolocation to that origin in its browser context. Navigate first, then set coordinates. Other origins and permissions stay unchanged. Before navigation, on opaque origins, on direct-page connections, and on other engines, it only sets coordinates. A refused or unsupported permission grant is reported before applying coordinates. The origin grant persists in the browser context, including attached Chrome contexts. Coordinate bounds apply to every engine.
+
 `set credentials` applies HTTP Basic Authentication to the current tab and tabs opened later. `set offline off` and `set headers '{}'` restore the default setup for future tabs.
 
 ### Cookies & Storage

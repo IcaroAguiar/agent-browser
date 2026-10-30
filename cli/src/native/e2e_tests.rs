@@ -14343,3 +14343,67 @@ async fn e2e_state_load_keeps_storage_away_from_page_scripts_and_redirects() {
     redirect_server.abort();
     hook_server.abort();
 }
+
+#[tokio::test]
+#[ignore]
+async fn e2e_geolocation_grants_only_active_origin() {
+    let (url, server) = start_raw_http_server(
+        "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\n<h1>test</h1>".into(),
+    )
+    .await;
+    let mut state = DaemonState::new();
+    assert_success(
+        &execute_command(
+            &json!({"id":"geo-launch","action":"launch","headless":true}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_success(
+        &execute_command(
+            &json!({"id":"geo-open","action":"navigate","url":url}),
+            &mut state,
+        )
+        .await,
+    );
+    let invalid = execute_command(
+        &json!({"id":"geo-invalid","action":"geolocation","latitude":91,"longitude":0}),
+        &mut state,
+    )
+    .await;
+    assert_eq!(invalid["success"], false);
+    assert_evaluate(
+        &mut state,
+        "geo-invalid-permission",
+        "navigator.permissions.query({name:'geolocation'}).then(p=>p.state)",
+        json!("prompt"),
+    )
+    .await;
+    assert_success(&execute_command(&json!({"id":"geo-set","action":"geolocation","latitude":0,"longitude":-47.88,"accuracy":25}), &mut state).await);
+    assert_evaluate(&mut state, "geo-position", "new Promise(resolve => navigator.geolocation.getCurrentPosition(p => resolve([p.coords.latitude,p.coords.longitude,p.coords.accuracy]), e => resolve({error:e.code}), {timeout:3000}))", json!([0,-47.88,25])).await;
+    assert_evaluate(
+        &mut state,
+        "geo-camera",
+        "navigator.permissions.query({name:'camera'}).then(p=>p.state)",
+        json!("prompt"),
+    )
+    .await;
+    let other = url.replace("127.0.0.1", "localhost");
+    assert_ne!(other, url);
+    assert_success(
+        &execute_command(
+            &json!({"id":"geo-other","action":"navigate","url":other}),
+            &mut state,
+        )
+        .await,
+    );
+    assert_evaluate(
+        &mut state,
+        "geo-other-permission",
+        "navigator.permissions.query({name:'geolocation'}).then(p=>p.state)",
+        json!("prompt"),
+    )
+    .await;
+    close_current_browser(&mut state).await.unwrap();
+    server.abort();
+}

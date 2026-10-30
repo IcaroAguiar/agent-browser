@@ -2178,21 +2178,60 @@ impl BrowserManager {
         Ok(())
     }
 
+    /// Grants geolocation to the active HTTP(S) origin/context before emulating coordinates.
     pub async fn set_geolocation(
         &self,
         latitude: f64,
         longitude: f64,
         accuracy: Option<f64>,
     ) -> Result<(), String> {
+        let accuracy = accuracy.unwrap_or(1.0);
+        if !latitude.is_finite()
+            || !(-90.0..=90.0).contains(&latitude)
+            || !longitude.is_finite()
+            || !(-180.0..=180.0).contains(&longitude)
+            || !accuracy.is_finite()
+            || accuracy < 0.0
+        {
+            return Err("Invalid geolocation coordinates or accuracy".into());
+        }
         let session_id = self.active_session_id()?;
+        if !self.direct_page
+            && !matches!(
+                self.browser_process.as_ref(),
+                Some(BrowserProcess::Lightpanda(_) | BrowserProcess::Obscura(_))
+            )
+        {
+            let info = self
+                .client
+                .send_command(
+                    "Target.getTargetInfo",
+                    Some(json!({ "targetId": self.active_target_id()? })),
+                    None,
+                )
+                .await?;
+            let target: TargetInfo =
+                serde_json::from_value(info["targetInfo"].clone()).map_err(|e| e.to_string())?;
+            if let Ok(url) = url::Url::parse(&target.url) {
+                if matches!(url.scheme(), "http" | "https") {
+                    let mut permission = json!({
+                        "permission": { "name": "geolocation" },
+                        "setting": "granted",
+                        "origin": url.origin().ascii_serialization(),
+                    });
+                    if let Some(context) = target.browser_context_id {
+                        permission["browserContextId"] = json!(context);
+                    }
+                    self.client
+                        .send_command("Browser.setPermission", Some(permission), None)
+                        .await?;
+                }
+            }
+        }
         self.client
             .send_command(
                 "Emulation.setGeolocationOverride",
-                Some(json!({
-                    "latitude": latitude,
-                    "longitude": longitude,
-                    "accuracy": accuracy.unwrap_or(1.0),
-                })),
+                Some(json!({ "latitude": latitude, "longitude": longitude, "accuracy": accuracy })),
                 Some(session_id),
             )
             .await?;

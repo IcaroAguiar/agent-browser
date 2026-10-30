@@ -203,6 +203,8 @@ agent-browser set media dark                  # Emulate color scheme
 agent-browser set media light reduced-motion  # Light mode + reduced motion
 ```
 
+On a loaded HTTP(S) page in Chrome, `set geo` grants geolocation to that origin in its browser context. Navigate first, then set coordinates. Other origins and permissions stay unchanged. Before navigation, on opaque origins, on direct-page connections, and on other engines, it only sets coordinates. A refused or unsupported permission grant is reported before applying coordinates. The origin grant persists in the browser context, including attached Chrome contexts. Coordinate bounds apply to every engine.
+
 ## Cookies and Storage
 
 ```bash
