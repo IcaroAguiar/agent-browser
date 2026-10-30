@@ -418,6 +418,13 @@ impl WaitUntil {
     }
 }
 
+/// Why a lifecycle wait stopped before reaching its state.
+#[derive(Debug, PartialEq, Eq)]
+enum LifecycleWaitError {
+    TimedOut,
+    StreamClosed,
+}
+
 /// Error returned when a load-state wait exceeds the caller's timeout budget.
 fn load_state_timeout_error(wait_until: WaitUntil, timeout: Duration) -> String {
     format!(
@@ -425,6 +432,26 @@ fn load_state_timeout_error(wait_until: WaitUntil, timeout: Duration) -> String 
         timeout.as_millis(),
         wait_until.label()
     )
+}
+
+/// Turns a lifecycle wait failure into a message that reports the caller's
+/// configured budget rather than whatever slice of it remained.
+fn lifecycle_wait_error(
+    wait_until: WaitUntil,
+    timeout: Duration,
+    error: LifecycleWaitError,
+) -> String {
+    match error {
+        LifecycleWaitError::TimedOut => load_state_timeout_error(wait_until, timeout),
+        LifecycleWaitError::StreamClosed => "Event stream closed".to_string(),
+    }
+}
+
+/// Time left before `deadline`, never zero so a helper timeout still expires.
+fn remaining_budget(deadline: Instant) -> Duration {
+    deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(1))
 }
 
 pub enum BrowserProcess {
@@ -1421,7 +1448,8 @@ impl BrowserManager {
         if nav_result.loader_id.is_some() && wait_until != WaitUntil::None {
             let timeout = Duration::from_millis(self.default_timeout_ms);
             self.wait_for_lifecycle(wait_until, &session_id, &mut lifecycle_rx, timeout)
-                .await?;
+                .await
+                .map_err(|error| lifecycle_wait_error(wait_until, timeout, error))?;
         }
 
         let page_url = self.get_url().await.unwrap_or_else(|_| url.to_string());
@@ -1453,14 +1481,14 @@ impl BrowserManager {
         session_id: &str,
         rx: &mut broadcast::Receiver<CdpEvent>,
         timeout: Duration,
-    ) -> Result<(), String> {
+    ) -> Result<(), LifecycleWaitError> {
         let event_name = match wait_until {
             WaitUntil::Load => "Page.loadEventFired",
             WaitUntil::DomContentLoaded => "Page.domContentEventFired",
             WaitUntil::NetworkIdle => {
                 return poll_network_idle(session_id, rx, timeout)
                     .await
-                    .map_err(|_| load_state_timeout_error(wait_until, timeout))
+                    .map_err(|_| LifecycleWaitError::TimedOut)
             }
             WaitUntil::None => return Ok(()),
         };
@@ -1476,13 +1504,14 @@ impl BrowserManager {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(LifecycleWaitError::StreamClosed)
+                    }
                 }
             }
-            Err("Event stream closed".to_string())
         })
         .await
-        .map_err(|_| load_state_timeout_error(wait_until, timeout))?
+        .map_err(|_| LifecycleWaitError::TimedOut)?
     }
 
     pub async fn get_url(&self) -> Result<String, String> {
@@ -1539,7 +1568,8 @@ impl BrowserManager {
     /// The caller owns the deadline: `wait --load` and `waitforloadstate` pass
     /// the command timeout (explicit `--timeout` or the configured default)
     /// instead of the browser's built-in default, so a larger budget is
-    /// actually waited out.
+    /// actually waited out. The ready-state probe and the event wait share one
+    /// deadline, so a slow probe cannot extend the total wait past the budget.
     pub async fn wait_for_lifecycle_external(
         &self,
         wait_until: WaitUntil,
@@ -1547,6 +1577,7 @@ impl BrowserManager {
         timeout_ms: u64,
     ) -> Result<(), String> {
         let timeout = Duration::from_millis(timeout_ms);
+        let deadline = Instant::now() + timeout;
         // Subscribe before probing so a lifecycle event that fires between
         // the probe and the wait cannot be missed.
         let mut rx = self.client.subscribe();
@@ -1578,9 +1609,8 @@ impl BrowserManager {
                     &params,
                     Some(session_id),
                 );
-            // The probe runs inside the caller's budget: a wedged renderer
-            // must not stretch the wait past its timeout.
-            match tokio::time::timeout(timeout, probe).await {
+            // The probe draws from the same budget as the wait that follows.
+            match tokio::time::timeout(remaining_budget(deadline), probe).await {
                 Ok(Ok(result)) => {
                     if result.result.value.as_ref().and_then(|v| v.as_bool()) == Some(true) {
                         return Ok(());
@@ -1592,8 +1622,9 @@ impl BrowserManager {
             }
         }
 
-        self.wait_for_lifecycle(wait_until, session_id, &mut rx, timeout)
+        self.wait_for_lifecycle(wait_until, session_id, &mut rx, remaining_budget(deadline))
             .await
+            .map_err(|error| lifecycle_wait_error(wait_until, timeout, error))
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
@@ -3657,10 +3688,20 @@ mod tests {
             }
         });
         let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
+        test_manager_from(client, format!("ws://{}", addr), pages)
+    }
+
+    /// Wraps an already connected client in a `BrowserManager` for mock CDP
+    /// servers, which own their own socket handling.
+    fn test_manager_from(
+        client: CdpClient,
+        ws_url: String,
+        pages: Vec<PageInfo>,
+    ) -> BrowserManager {
         BrowserManager {
             client: Arc::new(client),
             browser_process: None,
-            ws_url: format!("ws://{}", addr),
+            ws_url,
             pages,
             active_page_index: 0,
             default_timeout_ms: 25_000,
@@ -4663,8 +4704,7 @@ mod tests {
             .expect("caller budget should outlast the manager default");
     }
 
-    /// A short caller budget stops on its own schedule and names the state and
-    /// the budget that ran out.
+    /// A short caller budget stops on its own schedule.
     #[tokio::test]
     async fn test_wait_for_lifecycle_reports_caller_timeout() {
         let manager = test_manager(Vec::new()).await;
@@ -4686,13 +4726,10 @@ mod tests {
             "wait should stop at the caller budget, took {:?}",
             start.elapsed()
         );
-        assert_eq!(
-            error,
-            "Timed out after 150ms waiting for load state 'domcontentloaded'"
-        );
+        assert_eq!(error, LifecycleWaitError::TimedOut);
     }
 
-    /// Network idle honors the caller budget and reports it the same way.
+    /// Network idle honors the caller budget too.
     #[tokio::test]
     async fn test_wait_for_lifecycle_network_idle_reports_caller_timeout() {
         let manager = test_manager(Vec::new()).await;
@@ -4717,9 +4754,98 @@ mod tests {
             )
             .await
             .unwrap_err();
+        assert_eq!(error, LifecycleWaitError::TimedOut);
+    }
+
+    /// The reported message keeps the configured budget and the state name.
+    #[test]
+    fn test_lifecycle_wait_error_names_state_and_budget() {
         assert_eq!(
-            error,
-            "Timed out after 300ms waiting for load state 'networkidle'"
+            lifecycle_wait_error(
+                WaitUntil::NetworkIdle,
+                Duration::from_millis(30000),
+                LifecycleWaitError::TimedOut,
+            ),
+            "Timed out after 30000ms waiting for load state 'networkidle'"
+        );
+        assert_eq!(
+            lifecycle_wait_error(
+                WaitUntil::Load,
+                Duration::from_secs(1),
+                LifecycleWaitError::StreamClosed,
+            ),
+            "Event stream closed"
+        );
+    }
+
+    /// A probe that never answers draws from the same budget instead of
+    /// buying the following lifecycle wait a fresh full timeout.
+    #[tokio::test]
+    async fn test_wait_for_lifecycle_external_stops_at_budget_when_probe_stalls() {
+        let manager = test_manager(Vec::new()).await;
+
+        let start = Instant::now();
+        let error = manager
+            .wait_for_lifecycle_external(WaitUntil::Load, "session-1", 300)
+            .await
+            .unwrap_err();
+
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "probe and wait should share one 300ms budget, took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(error, "Timed out after 300ms waiting for load state 'load'");
+    }
+
+    /// A slow probe that answers "not reached" must leave only the remainder of
+    /// the budget, not restart it. Regression test for the review note on
+    /// #2251: a 500ms probe inside an 800ms budget must end near 800ms, not
+    /// near 1300ms.
+    #[tokio::test]
+    async fn test_wait_for_lifecycle_external_shares_budget_after_slow_probe() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            if let Some(Ok(Message::Text(text))) = ws.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let id = command["id"].clone();
+                // Answer the ready-state probe late with "not reached".
+                sleep(Duration::from_millis(500)).await;
+                let reply = json!({
+                    "id": id,
+                    "result": { "result": { "type": "boolean", "value": false } }
+                });
+                let _ = ws.send(Message::Text(reply.to_string())).await;
+                // Stay connected without a load event so the wait must expire.
+                sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        let client = CdpClient::connect(&format!("ws://{}", addr)).await.unwrap();
+        let manager = test_manager_from(client, format!("ws://{}", addr), Vec::new());
+
+        let start = Instant::now();
+        let error = manager
+            .wait_for_lifecycle_external(WaitUntil::Load, "session-1", 800)
+            .await
+            .unwrap_err();
+        let elapsed = start.elapsed();
+        server.abort();
+
+        assert_eq!(error, "Timed out after 800ms waiting for load state 'load'");
+        assert!(
+            elapsed >= Duration::from_millis(700),
+            "wait ended before its budget, took {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1150),
+            "probe restarted the budget, wait took {elapsed:?}"
         );
     }
 
