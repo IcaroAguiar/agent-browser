@@ -358,6 +358,12 @@ agent-browser storage local clear     # Clear all
 agent-browser storage session         # Same for sessionStorage
 ```
 
+Cookie attributes use kebab-case flags such as `--http-only` and `--same-site`. The legacy `--httpOnly` and `--sameSite` spellings remain accepted. When setting one cookie, unknown flags and extra arguments return an error.
+
+```bash
+agent-browser cookies set session_id abc123 --http-only --same-site Strict
+```
+
 ### Network
 
 ```bash
@@ -602,6 +608,8 @@ echo '{"selector":"@e2"}' | agent-browser mcp call agent_browser_click -
 Starts a Model Context Protocol server over stdio. MCP clients launch this command as a subprocess and exchange newline-delimited JSON-RPC on stdin and stdout. The server defaults to MCP protocol 2025-11-25 and accepts older supported client protocol versions during initialization. A tool call with an argument its schema does not declare fails with an invalid-params error that names the unknown keys and lists the tool's own arguments.
 
 `mcp call` runs one MCP tool without a stdio session and prints its `tools/call` result as JSON, with the agent-browser version in `_meta.agentBrowserVersion`. Pass the tool arguments as a JSON object, or `-` to read them from stdin. Every tool is available unless `--tools` limits the call to profiles. The exit code is 0 on success, 1 when the tool reports an error, and 2 for an unknown tool or invalid arguments. Use it from runtimes that cannot keep a stdio session open between tool calls, such as serverless agents. Access settings such as `AGENT_BROWSER_ALLOWED_DOMAINS` come from the environment, as with the server.
+
+In a Vercel Sandbox, `startAgentBrowserMcp` runs the server over the sandbox command's stdin. See [Serverless (Vercel)](#serverless-vercel).
 
 The default tools profile is `core`, which keeps MCP context small for everyday browser automation. Use `--tools all` for the full typed CLI parity surface, or combine profiles with commas, such as `--tools core,network,react`.
 
@@ -891,7 +899,7 @@ agent-browser includes security features for safe AI agent deployments. All feat
 - **Domain Allowlist**: Restrict navigation to trusted domains (wildcards like `*.example.com` also match the bare domain): `--allowed-domains "example.com,*.example.com"`. Sub-resource requests (scripts, images, fetch), WebSocket/EventSource connections, and `sendBeacon` calls to non-allowed domains are blocked. WebRTC peer connections are disabled in supported Chromium sessions while the allowlist is active to prevent STUN, TURN, and DNS traffic from bypassing HTTP interception. Dedicated and shared workers are guarded with a bootstrap wrapper; if a page CSP forbids that wrapper, the worker fails closed rather than running without the allowlist guard. Pre-existing CDP sessions, auto-connect, Chrome profiles, direct-page provider plugins, agent-browser restore or state-file replay, raw Chrome args that select profiles, restore sessions, or open startup pages, iOS, and Safari reject this option because agent-browser cannot install equivalent containment before page scripts run. Include any CDN domains your target pages depend on (e.g., `*.cdn.example.com`).
 - **Action Policy**: Gate destructive actions with a static policy file: `--action-policy ./policy.json`; a missing or invalid file blocks every command except `close`
 - **Action Confirmation**: Require explicit approval for sensitive action categories: `--confirm-actions eval,download`
-- **Output Length Limits**: Prevent context flooding: `--max-output 50000`
+- **Output Length Limits**: Prevent context flooding: `--max-output 50000`. Invalid `--max-output` and `AGENT_BROWSER_MAX_OUTPUT` values warn and keep the existing limit.
 
 | Variable                            | Description                              |
 | ----------------------------------- | ---------------------------------------- |
@@ -954,6 +962,8 @@ Inspect configured plugins:
 agent-browser plugin list
 agent-browser plugin show vault
 ```
+
+Credential resolution, browser launch and cleanup, and launch mutation errors omit plugin response error text and unsupported protocol values from diagnostics. Manifest discovery and `plugin run` retain detailed errors. Plugins remain trusted local executables; this redaction does not sandbox them.
 
 Use a credential provider plugin for one login:
 
@@ -1480,6 +1490,24 @@ const result = await withAgentBrowserSandbox(async (sandbox) => {
   return runAgentBrowserCommand(sandbox, ["screenshot"]);
 });
 ```
+
+When an agent makes many MCP tool calls in the same Vercel Sandbox, use `startAgentBrowserMcp` from `@agent-browser/sandbox/vercel`. It starts one `agent-browser mcp` process and sends every request over that command's stdin, so tool calls reuse the process instead of starting a CLI command each time as `runAgentBrowserCommand` does:
+
+```typescript
+import { startAgentBrowserMcp, withAgentBrowserSandbox } from "@agent-browser/sandbox/vercel";
+
+const snapshot = await withAgentBrowserSandbox(async (sandbox) => {
+  const mcp = await startAgentBrowserMcp(sandbox, { timeout: 60_000 });
+  try {
+    await mcp.callTool("agent_browser_open", { url: "https://example.com" });
+    return await mcp.callTool("agent_browser_snapshot", { interactive: true });
+  } finally {
+    await mcp.close();
+  }
+});
+```
+
+`startAgentBrowserMcp` requires `@vercel/sandbox` 3.7 or later. `timeout` is in milliseconds and applies to each request and to `close()`; without it, requests wait indefinitely. In another runtime, pass a process with `stdin` and `stdout` streams to `connectAgentBrowserMcp` from `@agent-browser/sandbox`.
 
 Install `@agent-browser/sandbox` and `@vercel/sandbox` in the consuming app. See the [sandbox helper example](examples/sandbox/) for minimal Vercel Sandbox usage, or the [environments example](examples/environments/) for a full UI demo with a deploy-to-Vercel button.
 
