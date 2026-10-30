@@ -11760,9 +11760,7 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
     state.har_recording = false;
-    state.har_body_total_bytes = 0;
-
-    let entries: Vec<Value> = state.har_entries.drain(..).map(har_entry_to_json).collect();
+    let entries: Vec<Value> = state.har_entries.iter().map(har_entry_to_json).collect();
     let request_count = entries.len();
     let browser = har_browser_metadata(state).await;
 
@@ -11783,6 +11781,9 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
         .map_err(|e| format!("Failed to serialize HAR: {}", e))?;
     std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
 
+    state.har_entries.clear();
+    state.har_body_total_bytes = 0;
+
     Ok(json!({ "path": path, "requestCount": request_count }))
 }
 
@@ -11791,7 +11792,7 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
 // ---------------------------------------------------------------------------
 
 /// Convert a `HarEntry` (collected from CDP events) into a HAR 1.2 entry object.
-fn har_entry_to_json(e: HarEntry) -> Value {
+fn har_entry_to_json(e: &HarEntry) -> Value {
     let started_date_time = har_wall_time_to_rfc3339(e.wall_time);
 
     let request_cookies = e
@@ -11832,9 +11833,9 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         har_compute_timings(e.cdp_timing.as_ref(), e.loading_finished_timestamp);
 
     let mime_type = if e.mime_type.is_empty() {
-        "application/octet-stream".to_string()
+        "application/octet-stream"
     } else {
-        e.mime_type
+        e.mime_type.as_str()
     };
 
     let post_content_type = e
@@ -11855,7 +11856,7 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         "headersSize": -1,
         "bodySize": e.request_body_size,
     });
-    if let Some(body) = e.post_data {
+    if let Some(body) = &e.post_data {
         request["postData"] = json!({ "mimeType": post_content_type, "text": body });
     }
 
@@ -11863,7 +11864,7 @@ fn har_entry_to_json(e: HarEntry) -> Value {
         "size": e.response_body_size,
         "mimeType": mime_type,
     });
-    if let Some(body) = e.response_body {
+    if let Some(body) = &e.response_body {
         content["text"] = json!(body);
         if e.response_body_base64 {
             content["encoding"] = json!("base64");
@@ -18489,7 +18490,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_base64: false,
         };
 
-        let har = har_entry_to_json(entry);
+        let har = har_entry_to_json(&entry);
         assert_eq!(har["startedDateTime"], "2026-03-15T12:00:00Z");
         assert_eq!(har["request"]["method"], "POST");
         assert_eq!(har["request"]["httpVersion"], "HTTP/2.0");
@@ -18539,13 +18540,13 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body_base64: false,
         };
 
-        let har = har_entry_to_json(entry.clone());
+        let har = har_entry_to_json(&entry);
         assert_eq!(har["response"]["content"]["text"], r#"{"items":[1]}"#);
         assert!(har["response"]["content"].get("encoding").is_none());
 
         entry.response_body = Some("aGVsbG8=".to_string());
         entry.response_body_base64 = true;
-        let har = har_entry_to_json(entry);
+        let har = har_entry_to_json(&entry);
         assert_eq!(har["response"]["content"]["text"], "aGVsbG8=");
         assert_eq!(har["response"]["content"]["encoding"], "base64");
     }
@@ -18634,7 +18635,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
             response_body: None,
             response_body_base64: false,
         };
-        let har = har_entry_to_json(entry);
+        let har = har_entry_to_json(&entry);
         assert_eq!(har["response"]["cookies"][0]["name"], "token");
         assert_eq!(har["response"]["cookies"][0]["value"], "abc");
     }
@@ -18710,6 +18711,82 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert_eq!(har["log"]["entries"][0]["response"]["content"]["size"], 128);
 
         let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn test_handle_har_stop_can_retry_after_write_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let invalid_path = dir.path().join("missing/retry.har");
+        let valid_path = dir.path().join("retry.har");
+        let response_body = r#"{"ok":true}"#;
+        let mut state = DaemonState::new();
+        state.har_recording = true;
+        state.har_body_total_bytes = 123;
+        state.har_entries.push(HarEntry {
+            request_id: "retry-request".to_string(),
+            wall_time: 1773576000.0,
+            method: "POST".to_string(),
+            url: "https://example.com/retry".to_string(),
+            request_headers: vec![],
+            post_data: Some("request body".to_string()),
+            request_body_size: 12,
+            resource_type: "XHR".to_string(),
+            status: Some(200),
+            status_text: "OK".to_string(),
+            http_version: "HTTP/1.1".to_string(),
+            response_headers: vec![],
+            mime_type: "application/json".to_string(),
+            redirect_url: String::new(),
+            response_body_size: response_body.len() as i64,
+            cdp_timing: None,
+            loading_finished_timestamp: None,
+            response_body: Some(response_body.to_string()),
+            response_body_base64: false,
+        });
+
+        let error = handle_har_stop(
+            &json!({ "path": invalid_path.to_string_lossy() }),
+            &mut state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("Failed to write HAR"));
+        assert!(!state.har_recording);
+        assert_eq!(state.har_entries.len(), 1);
+        assert_eq!(
+            state.har_entries[0].response_body.as_deref(),
+            Some(response_body)
+        );
+        assert_eq!(state.har_body_total_bytes, 123);
+
+        let result = handle_har_stop(
+            &json!({ "path": valid_path.to_string_lossy() }),
+            &mut state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["path"], valid_path.to_string_lossy().as_ref());
+        assert_eq!(result["requestCount"], 1);
+        assert!(!state.har_recording);
+        assert!(state.har_entries.is_empty());
+        assert_eq!(state.har_body_total_bytes, 0);
+
+        let har: Value = serde_json::from_str(&fs::read_to_string(valid_path).unwrap()).unwrap();
+        assert_eq!(har["log"]["entries"][0]["request"]["method"], "POST");
+        assert_eq!(
+            har["log"]["entries"][0]["request"]["url"],
+            "https://example.com/retry"
+        );
+        assert_eq!(
+            har["log"]["entries"][0]["request"]["postData"]["text"],
+            "request body"
+        );
+        assert_eq!(
+            har["log"]["entries"][0]["response"]["content"]["text"],
+            response_body
+        );
     }
 
     #[tokio::test]
