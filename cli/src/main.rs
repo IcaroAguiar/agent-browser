@@ -1996,7 +1996,11 @@ fn main() {
     }
 
     // Launch with cloud provider if -p flag is set.
-    if let Some(ref provider) = flags.provider {
+    if let Some(provider) = flags
+        .provider
+        .as_ref()
+        .filter(|_| cmd.get("action").and_then(|value| value.as_str()) != Some("cdp_url"))
+    {
         let launch_cmd = build_provider_launch_command(provider, &flags);
 
         let err = match send_command(launch_cmd, &flags.session) {

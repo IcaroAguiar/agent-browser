@@ -158,6 +158,46 @@ impl Drop for Sessions {
 
 #[test]
 #[ignore]
+fn cdp_url_ignores_provider_configuration() {
+    let sessions = Sessions::new();
+    let output = sessions
+        .command("pin-tab-cli-victim")
+        .env("AGENT_BROWSER_PROVIDER", "metadata-invalid-provider")
+        .env("AGENT_BROWSER_PLUGINS", "[]")
+        .env_remove("AGENT_BROWSER_CDP")
+        .env_remove("AGENT_BROWSER_AUTO_CONNECT")
+        .args(["--json", "get", "cdp-url"])
+        .output()
+        .unwrap();
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{response}");
+    assert_eq!(response["error"], "Browser not launched");
+}
+
+#[test]
+#[ignore]
+fn cdp_url_rejects_dead_external_browser_without_relaunch() {
+    let sessions = Sessions::new();
+    let host = "pin-tab-cli-host";
+    let victim = "pin-tab-cli-victim";
+
+    sessions.run_json(host, &["open", "data:text/html,<title>metadata</title>"]);
+    let cdp = sessions.run_json(host, &["get", "cdp-url"]);
+    let ws_url = cdp["data"]["cdpUrl"].as_str().unwrap();
+    let attached = sessions.run_json(victim, &["--cdp", ws_url, "get", "cdp-url"]);
+    assert_eq!(attached["data"]["cdpUrl"], ws_url);
+    let pid = sessions.pid(victim);
+
+    sessions.run_json(host, &["close"]);
+    let response = sessions.run_json_failure(victim, &["get", "cdp-url"]);
+
+    assert_eq!(response["error"], "Browser not launched");
+    assert_eq!(sessions.pid(victim), pid);
+}
+
+#[test]
+#[ignore]
 fn cdp_pin_tab_precedes_attach_in_existing_daemon() {
     let server = TestServer::start();
     let sessions = Sessions::new();

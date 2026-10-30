@@ -3192,7 +3192,7 @@ pub async fn execute_command(cmd: &Value, state: &mut DaemonState) -> Value {
         "navigate" => handle_navigate(cmd, state).await,
         "read" => handle_read(cmd, state).await,
         "url" => handle_url(state).await,
-        "cdp_url" => handle_cdp_url(state),
+        "cdp_url" => handle_cdp_url(state).await,
         "inspect" => handle_inspect(state).await,
         "title" => handle_title(state).await,
         "content" => handle_content(state).await,
@@ -5916,8 +5916,11 @@ async fn handle_read(cmd: &Value, state: &DaemonState) -> Result<Value, String> 
     ))
 }
 
-fn handle_cdp_url(state: &DaemonState) -> Result<Value, String> {
+async fn handle_cdp_url(state: &DaemonState) -> Result<Value, String> {
     let mgr = state.browser.as_ref().ok_or("Browser not launched")?;
+    if !mgr.is_connection_alive().await {
+        return Err("Browser not launched".to_string());
+    }
     Ok(json!({ "cdpUrl": mgr.get_cdp_url() }))
 }
 
