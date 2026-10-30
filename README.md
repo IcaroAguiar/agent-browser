@@ -759,6 +759,8 @@ agent-browser session id --scope worktree --prefix next-dev-loop
 agent-browser session info --json
 ```
 
+Session names accept Unicode letters and numbers, hyphens, and underscores only. For example, `café-東京_7` is valid, while `my session` is rejected because it contains a space.
+
 Each session has its own:
 
 - Browser instance
