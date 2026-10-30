@@ -588,12 +588,11 @@ agent-browser skills                  # List available skills
 agent-browser skills list             # Same as above
 agent-browser skills get <name>       # Output a skill's full content
 agent-browser skills get <name> --full  # Include references and templates
-agent-browser skills get protected-vercel-deployments  # Access protected Vercel deployments
 agent-browser skills get --all        # Output every skill
 agent-browser skills path [name]      # Print skill directory path
 ```
 
-Serves bundled skill content that always matches the installed CLI version. AI agents use this to get current instructions rather than relying on cached copies. Set `AGENT_BROWSER_SKILLS_DIR` to override the skills directory path.
+Standalone binaries and binaries installed with `cargo install agent-browser` include the `core` skill for `agent-browser skills get core`. Add `--full` to include its references and templates. npm installations read skills from the installed package's `skills/` and `skill-data/` directories. Set `AGENT_BROWSER_SKILLS_DIR` to a directory containing skill folders to override the default lookup.
 
 ### MCP Server
 

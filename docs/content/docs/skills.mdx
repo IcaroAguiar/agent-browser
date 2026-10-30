@@ -17,6 +17,8 @@ This installs a single discovery skill that teaches your agent about agent-brows
 
 Agents retrieve skill content at runtime using the `agent-browser skills` command. This always serves content matching the installed CLI version, so instructions never go stale.
 
+By default, npm installations read skills from the installed package's `skills/` and `skill-data/` directories. Standalone binaries and binaries installed with `cargo install agent-browser` include the `core` skill for `agent-browser skills get core`. Add `--full` to include its references and templates.
+
 <table>
   <thead>
     <tr>
@@ -54,13 +56,15 @@ Agents retrieve skill content at runtime using the `agent-browser skills` comman
 
 All commands support `--json` for structured output.
 
-Set the `AGENT_BROWSER_SKILLS_DIR` environment variable to override the skills directory path.
+Set the `AGENT_BROWSER_SKILLS_DIR` environment variable to override the skills directory path. It must point to a directory containing skill folders.
 
 ## How It Works
 
 The discovery skill installed via `npx skills add` is intentionally thin and stable. It makes agents aware of agent-browser, provides trigger words for activation, and points to the `agent-browser skills` command. Actual usage instructions, command references, workflows, and specialized knowledge all live in the CLI-served skills.
 
 This design solves the version drift problem: the installed SKILL.md rarely changes, while the CLI always serves content matching its own version.
+
+The CLI reads npm-installed skills from the package directories and uses embedded core files for standalone and Cargo-installed binaries. `AGENT_BROWSER_SKILLS_DIR` overrides the default lookup.
 
 ## Available Skills
 
@@ -81,4 +85,4 @@ For eve agents, mount the [`@agent-browser/eve`](/eve) extension instead of writ
 
 ## Source
 
-All skill files are in the [`skills/`](https://github.com/vercel-labs/agent-browser/tree/main/skills) and [`skill-data/`](https://github.com/vercel-labs/agent-browser/tree/main/skill-data) directories of the repository. The `skills/` directory holds the discovery stub that `npx skills add` installs; the `skill-data/` directory holds the runtime skill content served by the CLI.
+All skill files are in the [`skills/`](https://github.com/vercel-labs/agent-browser/tree/main/skills) and [`skill-data/`](https://github.com/vercel-labs/agent-browser/tree/main/skill-data) directories of the repository. The `skills/` directory holds the discovery stub that `npx skills add` installs; the `skill-data/` directory holds the runtime skill content served by the CLI. npm installations read runtime skills from `skill-data/`. The core files in `cli/skill-assets/core/` are embedded in standalone and Cargo-installed binaries.
