@@ -1214,7 +1214,7 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_MOUSE_WHEEL,
             "Mouse wheel",
-            "Scroll with the mouse wheel.",
+            "Scroll with the mouse wheel at the current pointer.",
             json!({ "dy": number_schema(), "dx": number_schema() }),
             &["dy"],
         ),

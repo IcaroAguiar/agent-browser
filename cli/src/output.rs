@@ -2476,7 +2476,7 @@ Subcommands:
   move <x> <y>         Move mouse to coordinates
   down [button]        Press mouse button (left, right, middle)
   up [button]          Release mouse button
-  wheel <dy> [dx]      Scroll mouse wheel
+  wheel <dy> [dx]      Scroll at current tracked pointer (starts at 0,0)
 
 Movement Options:
   --duration <ms>       Target total duration, including browser response time
@@ -2492,12 +2492,12 @@ Global Options:
 
 Examples:
   agent-browser mouse move 100 200
+  agent-browser mouse wheel 100
   agent-browser mouse move 600 400 --duration 250 --steps 24
   agent-browser mouse move 600 400 --human --seed 42
   agent-browser mouse down
   agent-browser mouse up
   agent-browser mouse down right
-  agent-browser mouse wheel 100
   agent-browser mouse wheel -50 0
 "##
         }

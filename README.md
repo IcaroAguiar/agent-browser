@@ -322,7 +322,14 @@ agent-browser mouse move 600 400 --duration 250 --steps 24 # Smooth movement
 agent-browser mouse move 600 400 --human --seed 42 # Reproducible curved movement
 agent-browser mouse down [button]     # Press button (left/right/middle)
 agent-browser mouse up [button]       # Release button
-agent-browser mouse wheel <dy> [dx]   # Scroll wheel
+agent-browser mouse wheel <dy> [dx]   # Scroll at current tracked pointer (starts at 0,0)
+```
+
+To scroll elsewhere, move the pointer first:
+
+```bash
+agent-browser mouse move 600 400
+agent-browser mouse wheel 100
 ```
 
 Add `--human` to `click` or `drag` for curved, eased movement from the current cursor position. For timed mouse moves, `--duration` is the target total duration, including browser response time; a slow browser can still extend it.
