@@ -167,8 +167,10 @@ agent-browser mouse move 600 400 --duration 250 --steps 24
 agent-browser mouse move 600 400 --human --seed 42
 agent-browser mouse down [button]     # Press button
 agent-browser mouse up [button]       # Release button
-agent-browser mouse wheel <dy> [dx]   # Scroll at current tracked pointer (starts at 0,0)
+agent-browser mouse wheel <dy> [dx]   # Scroll wheel
 ```
+
+The wheel scrolls at the current tracked pointer, which starts at `0,0`.
 
 To scroll elsewhere, move the pointer first:
 

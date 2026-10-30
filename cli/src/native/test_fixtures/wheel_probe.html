@@ -11,11 +11,13 @@
       top: 180px;
       width: 160px;
       height: 100px;
+      overflow-y: auto;
     }
+    #target > div { height: 300px; pointer-events: none; }
   </style>
 </head>
 <body>
-  <div id="target"></div>
+  <div id="target"><div></div></div>
   <script>
     window.__wheelProbe = null;
     window.__wheelEvents = [];
