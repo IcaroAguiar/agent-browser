@@ -55,6 +55,16 @@ fn build_json_error_body(error: &str) -> String {
     format!(r#"{{"success":false,"error":{escaped}}}"#)
 }
 
+fn validate_dashboard_session_name(session: &str) -> Result<(), String> {
+    if session.is_empty() || session.len() > 64 {
+        return Err("Session name must be 1-64 characters".to_string());
+    }
+    if !crate::validation::is_valid_session_name(session) {
+        return Err(crate::validation::session_name_error(session));
+    }
+    Ok(())
+}
+
 async fn write_http_response_inner(
     stream: &mut tokio::net::TcpStream,
     status: &str,
@@ -945,9 +955,7 @@ async fn kill_session(body: &str) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing \"session\" field")?;
 
-    if session.is_empty() || session.len() > 64 {
-        return Err("Session name must be 1-64 characters".to_string());
-    }
+    validate_dashboard_session_name(session)?;
 
     let dir = get_socket_dir();
     let pid_path = SessionFile::Pid.path_in(&dir, session);
@@ -992,9 +1000,7 @@ pub(super) async fn spawn_session(body: &str) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or("Missing \"session\" field")?;
 
-    if session.is_empty() || session.len() > 64 {
-        return Err("Session name must be 1-64 characters".to_string());
-    }
+    validate_dashboard_session_name(session)?;
 
     let exe = std::env::current_exe().map_err(|e| format!("Cannot resolve executable: {}", e))?;
 
@@ -1028,6 +1034,28 @@ mod tests {
     use crate::test_utils::EnvGuard;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn dashboard_session_name_validation_uses_the_shared_unicode_grammar() {
+        for session in ["session", "my-session_7", "café-東京_7"] {
+            assert!(
+                validate_dashboard_session_name(session).is_ok(),
+                "{session}"
+            );
+        }
+
+        for session in ["", "has space"] {
+            assert!(
+                validate_dashboard_session_name(session).is_err(),
+                "{session}"
+            );
+        }
+
+        assert_eq!(
+            validate_dashboard_session_name(&"a".repeat(65)),
+            Err("Session name must be 1-64 characters".to_string())
+        );
+    }
 
     async fn send_request_to_dashboard_handler(request: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

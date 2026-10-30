@@ -2030,7 +2030,7 @@ fn tool(name: &str, title: &str, description: &str, properties: Value, required:
         "session".to_string(),
         json!({
             "type": "string",
-            "description": "Optional isolated browser session name."
+            "description": "Optional isolated browser session name. Accepts Unicode letters and numbers, hyphens, and underscores only; spaces are rejected."
         }),
     );
     props.insert(
@@ -2558,8 +2558,37 @@ fn call_cli_tool(
 ) -> Result<Value, ProtocolError> {
     validate_arguments_object(arguments)?;
     let session = optional_string(arguments, "session")?;
+    if let Some(session) = session.as_deref() {
+        if !crate::validation::is_valid_session_name(session) {
+            return Err(ProtocolError::invalid_params(
+                crate::validation::session_name_error(session),
+            ));
+        }
+    }
     let timeout_ms = optional_timeout(arguments)?;
     let cli_args = cli_tool_args(arguments, command_args, session.as_deref())?;
+    let mut cli_session = None;
+    let mut args = cli_args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--session" {
+            if let Some(value) = args.next() {
+                cli_session = Some(value.clone());
+            }
+        }
+    }
+    let effective_session = cli_session
+        .or_else(|| env::var("AGENT_BROWSER_SESSION").ok())
+        .or_else(|| {
+            crate::flags::load_config(&cli_args)
+                .ok()
+                .and_then(|c| c.session)
+        })
+        .unwrap_or_else(|| "default".to_string());
+    if !crate::validation::is_valid_session_name(&effective_session) {
+        return Err(ProtocolError::invalid_params(
+            crate::validation::session_name_error(&effective_session),
+        ));
+    }
 
     let run = run_cli(&cli_args, stdin_body, timeout_ms).map_err(|e| {
         ProtocolError::invalid_params(format!("Failed to run agent-browser: {}", e))
@@ -5803,6 +5832,59 @@ mod tests {
     fn required_string_rejects_missing_field() {
         let err = required_string(&json!({}), "selector").unwrap_err();
         assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn call_tool_rejects_invalid_session_name() {
+        let err = call_tool(
+            Some(&json!({
+                "name": TOOL_GET_URL,
+                "arguments": { "session": "has space" }
+            })),
+            &McpConfig::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, -32602);
+        assert_eq!(
+            err.message,
+            crate::validation::session_name_error("has space")
+        );
+    }
+
+    #[test]
+    fn call_cli_tool_rejects_invalid_extra_session_before_child_spawn() {
+        let err = call_cli_tool(
+            &json!({"extraArgs": ["--session", "has space"]}),
+            Vec::new(),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, -32602);
+        assert_eq!(
+            err.message,
+            crate::validation::session_name_error("has space")
+        );
+    }
+
+    #[test]
+    fn call_cli_tool_rejects_invalid_inherited_session_with_equals_extra_arg() {
+        let env = crate::test_utils::EnvGuard::new(&["AGENT_BROWSER_SESSION"]);
+        env.set("AGENT_BROWSER_SESSION", "has space");
+
+        let err = call_cli_tool(
+            &json!({"extraArgs": ["--session=valid"]}),
+            Vec::new(),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, -32602);
+        assert_eq!(
+            err.message,
+            crate::validation::session_name_error("has space")
+        );
     }
 
     #[test]
