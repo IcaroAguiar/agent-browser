@@ -522,7 +522,7 @@ fn build_chrome_args(options: &LaunchOptions) -> Result<ChromeArgs, String> {
     }
 
     if let Some(ref proxy) = options.proxy {
-        args.push(format!("--proxy-server={}", proxy));
+        args.push(format!("--proxy-server={}", proxy.trim_end_matches('/')));
     }
 
     if let Some(ref bypass) = options.proxy_bypass {
