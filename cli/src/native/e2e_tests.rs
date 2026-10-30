@@ -1794,6 +1794,78 @@ async fn e2e_snapshot_refs_invalidate_iframe_navigation() {
     assert_success(&execute_command(&json!({"action": "close"}), &mut state).await);
 }
 
+#[tokio::test]
+#[ignore]
+async fn e2e_presentational_cross_origin_iframe_refs_support_fill_and_inputvalue() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}/");
+    let server = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 4096];
+                let read = stream.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let body = if request.starts_with("GET /child ") {
+                    "<!doctype html><input aria-label='Child field'>".to_string()
+                } else {
+                    format!(
+                        "<!doctype html><iframe role='none' src='http://localhost:{port}/child'></iframe><iframe role='presentation' src='http://localhost:{port}/child'></iframe>"
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    let mut state = DaemonState::new();
+    for (id, command) in [
+        ("1", json!({"action": "launch", "headless": true})),
+        ("2", json!({"action": "navigate", "url": url})),
+    ] {
+        let mut command = command;
+        command["id"] = json!(id);
+        assert_success(&execute_command(&command, &mut state).await);
+    }
+    let snapshot = execute_command(&json!({"id": "3", "action": "snapshot"}), &mut state).await;
+    assert_success(&snapshot);
+    let refs = get_data(&snapshot)["refs"].as_object().unwrap();
+    assert_eq!(
+        refs.values()
+            .filter(|node| node["role"] == "Iframe")
+            .count(),
+        2
+    );
+    let child_refs = refs
+        .iter()
+        .filter(|(_, node)| node["role"] == "textbox" && node["name"] == "Child field")
+        .map(|(reference, _)| reference.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(child_refs.len(), 2);
+    for (index, reference) in child_refs.iter().enumerate() {
+        let selector = format!("@{reference}");
+        let fill = execute_command(
+            &json!({"id": format!("fill-{index}"), "action": "fill", "selector": selector, "value": format!("filled-{index}")}),
+            &mut state,
+        )
+        .await;
+        assert_success(&fill);
+        let value = execute_command(
+            &json!({"id": format!("value-{index}"), "action": "inputvalue", "selector": selector}),
+            &mut state,
+        )
+        .await;
+        assert_success(&value);
+        assert_eq!(get_data(&value)["value"], format!("filled-{index}"));
+    }
+    assert_success(&execute_command(&json!({"id": "close", "action": "close"}), &mut state).await);
+    server.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Screenshot
 // ---------------------------------------------------------------------------
