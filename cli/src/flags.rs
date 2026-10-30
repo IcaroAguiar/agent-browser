@@ -757,9 +757,13 @@ pub fn parse_flags(args: &[String]) -> Flags {
 
     let mut i = 0;
     let mut seen_command = false;
+    let mut wait_command_seen = false;
     while i < args.len() {
         let arg = args[i].as_str();
         if !arg.starts_with('-') && looks_like_command(arg) {
+            if !seen_command {
+                wait_command_seen = arg == "wait";
+            }
             seen_command = true;
         }
         match arg {
@@ -932,10 +936,12 @@ pub fn parse_flags(args: &[String]) -> Flags {
                 }
             }
             "--state" => {
-                if let Some(s) = args.get(i + 1) {
-                    flags.state = Some(s.clone());
-                    flags.cli_state = true;
-                    i += 1;
+                if !wait_command_seen {
+                    if let Some(s) = args.get(i + 1) {
+                        flags.state = Some(s.clone());
+                        flags.cli_state = true;
+                        i += 1;
+                    }
                 }
             }
             "--proxy" => {
@@ -1289,6 +1295,7 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
 
     let mut i = 0;
     let mut seen_command = false;
+    let mut wait_command_seen = false;
     while i < args.len() {
         let arg = &args[i];
         if skip_next {
@@ -1297,6 +1304,11 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             continue;
         }
         if arg.starts_with("--restore=") {
+            i += 1;
+            continue;
+        }
+        if arg == "--state" && wait_command_seen {
+            result.push(arg.clone());
             i += 1;
             continue;
         }
@@ -1326,6 +1338,9 @@ pub fn clean_args(args: &[String]) -> Vec<String> {
             continue;
         }
         if !arg.starts_with('-') && looks_like_command(arg) {
+            if !seen_command {
+                wait_command_seen = arg == "wait";
+            }
             seen_command = true;
         }
         result.push(arg.clone());
@@ -1404,6 +1419,47 @@ mod tests {
     fn test_parse_headers_flag() {
         let flags = parse_flags(&args(r#"open example.com --headers {"Auth":"token"}"#));
         assert_eq!(flags.headers, Some(r#"{"Auth":"token"}"#.to_string()));
+    }
+
+    #[test]
+    fn test_wait_state_is_not_parsed_as_global_state() {
+        for input in [
+            "wait #spinner --state hidden",
+            "wait --state hidden #spinner",
+        ] {
+            let flags = parse_flags(&args(input));
+            assert_eq!(flags.state, None);
+            assert!(!flags.cli_state);
+        }
+    }
+
+    #[test]
+    fn test_global_state_before_wait_and_on_other_commands_is_preserved() {
+        let before_wait = parse_flags(&args("--state /tmp/auth.json wait #spinner"));
+        assert_eq!(before_wait.state.as_deref(), Some("/tmp/auth.json"));
+        assert!(before_wait.cli_state);
+
+        let other_command = parse_flags(&args("open example.com --state /tmp/auth.json"));
+        assert_eq!(other_command.state.as_deref(), Some("/tmp/auth.json"));
+        assert!(other_command.cli_state);
+    }
+
+    #[test]
+    fn test_clean_args_keeps_wait_state_and_strips_global_state() {
+        for input in [
+            "wait #spinner --state hidden",
+            "wait --state hidden #spinner",
+        ] {
+            assert_eq!(clean_args(&args(input)), args(input));
+        }
+        assert_eq!(
+            clean_args(&args("--state /tmp/auth.json wait #spinner")),
+            args("wait #spinner")
+        );
+        assert_eq!(
+            clean_args(&args("open example.com --state /tmp/auth.json")),
+            args("open example.com")
+        );
     }
 
     #[test]
