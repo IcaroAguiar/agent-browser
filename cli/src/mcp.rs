@@ -993,7 +993,14 @@ fn tools() -> Vec<Value> {
         ),
         tool(TOOL_SCROLL_INTO_VIEW, "Scroll into view", "Scroll an element into view.", json!({ "selector": selector_schema() }), &["selector"]),
         tool(TOOL_WAIT_MS, "Wait milliseconds", "Wait for a fixed time.", json!({ "ms": { "type": "integer", "minimum": 0 } }), &["ms"]),
-        wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element to appear.", json!({ "selector": selector_schema() }), &["selector"]),
+        wait_tool(TOOL_WAIT_FOR_SELECTOR, "Wait for selector", "Wait for an element to reach a state.", json!({
+            "selector": selector_schema(),
+            "state": {
+                "type": "string",
+                "enum": ["visible", "hidden", "attached", "detached"],
+                "description": "Element state to wait for."
+            }
+        }), &["selector"]),
         wait_tool(TOOL_WAIT_FOR_TEXT, "Wait for text", "Wait for text to appear.", json!({ "text": { "type": "string" } }), &["text"]),
         wait_tool(TOOL_WAIT_FOR_URL, "Wait for URL", "Wait for the current URL to match a pattern.", json!({ "url": { "type": "string", "description": "URL glob or pattern." } }), &["url"]),
         wait_tool(TOOL_WAIT_FOR_LOAD, "Wait for load state", "Wait for a page load state.", json!({ "state": { "type": "string", "enum": ["load", "domcontentloaded", "networkidle"] } }), &["state"]),
@@ -2361,7 +2368,9 @@ fn call_tool(params: Option<&Value>, config: &McpConfig) -> Result<Value, Protoc
         TOOL_SCROLL => call_scroll(arguments),
         TOOL_SCROLL_INTO_VIEW => call_simple_selector(arguments, "scrollintoview"),
         TOOL_WAIT_MS => call_wait_ms(arguments),
-        TOOL_WAIT_FOR_SELECTOR => call_wait_flag(arguments, None, "selector"),
+        TOOL_WAIT_FOR_SELECTOR => {
+            call_cli_tool(arguments, wait_selector_command_args(arguments)?, None)
+        }
         TOOL_WAIT_FOR_TEXT => call_wait_flag(arguments, Some("--text"), "text"),
         TOOL_WAIT_FOR_URL => call_wait_flag(arguments, Some("--url"), "url"),
         TOOL_WAIT_FOR_LOAD => call_wait_flag(arguments, Some("--load"), "state"),
@@ -2947,6 +2956,17 @@ fn call_scroll(arguments: &Value) -> Result<Value, ProtocolError> {
 fn call_wait_ms(arguments: &Value) -> Result<Value, ProtocolError> {
     let ms = required_u64(arguments, "ms")?;
     call_cli_tool(arguments, vec!["wait".to_string(), ms.to_string()], None)
+}
+
+fn wait_selector_command_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
+    let mut args = vec!["wait".to_string(), required_string(arguments, "selector")?];
+    if let Some(state) = optional_string(arguments, "state")? {
+        args.extend(["--state".to_string(), state]);
+    }
+    if let Some(timeout) = optional_u64(arguments, "waitTimeoutMs")? {
+        args.extend(["--timeout".to_string(), timeout.to_string()]);
+    }
+    Ok(args)
 }
 
 fn call_wait_flag(
@@ -4550,6 +4570,51 @@ mod tests {
         assert!(names.contains(&TOOL_SESSION_INFO));
         assert!(!names.contains(&"agent_browser_frame_list"));
         assert!(names.iter().all(|name| name.starts_with("agent_browser_")));
+    }
+
+    #[test]
+    fn wait_for_selector_state_is_optional_and_maps_to_cli() {
+        let selector_tool = tools()
+            .into_iter()
+            .find(|tool| tool["name"].as_str() == Some(TOOL_WAIT_FOR_SELECTOR))
+            .unwrap();
+        assert_eq!(
+            selector_tool["inputSchema"]["properties"]["state"]["enum"],
+            json!(["visible", "hidden", "attached", "detached"])
+        );
+        assert_eq!(
+            selector_tool["inputSchema"]["required"],
+            json!(["selector"])
+        );
+
+        let with_state = wait_selector_command_args(&json!({
+            "selector": "#target",
+            "state": "hidden",
+            "waitTimeoutMs": 500
+        }))
+        .unwrap();
+        assert_eq!(
+            with_state,
+            ["wait", "#target", "--state", "hidden", "--timeout", "500"]
+        );
+        let flags = crate::flags::parse_flags(&with_state);
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&with_state), &flags).unwrap();
+        assert_eq!(command["state"], "hidden");
+        assert_eq!(command["timeout"], 500);
+
+        let without_state = wait_selector_command_args(&json!({
+            "selector": "#target",
+            "waitTimeoutMs": 500
+        }))
+        .unwrap();
+        assert_eq!(without_state, ["wait", "#target", "--timeout", "500"]);
+        let flags = crate::flags::parse_flags(&without_state);
+        let command =
+            crate::commands::parse_command(&crate::flags::clean_args(&without_state), &flags)
+                .unwrap();
+        assert!(command.get("state").is_none());
+        assert_eq!(command["timeout"], 500);
     }
 
     #[test]

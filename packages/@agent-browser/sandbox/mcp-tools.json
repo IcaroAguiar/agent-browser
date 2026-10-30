@@ -15097,7 +15097,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Wait for an element to appear.",
+      "description": "Wait for an element to reach a state.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -15169,6 +15169,16 @@
           },
           "session": {
             "description": "Optional isolated browser session name.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Element state to wait for.",
+            "enum": [
+              "visible",
+              "hidden",
+              "attached",
+              "detached"
+            ],
             "type": "string"
           },
           "timeoutMs": {
