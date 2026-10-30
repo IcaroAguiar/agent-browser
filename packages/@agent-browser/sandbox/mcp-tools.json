@@ -11634,7 +11634,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get skill content by name. Standalone and Cargo-installed binaries include core; set full to include its references and templates.",
+      "description": "Get skill content, including home-directory skills when no package root is found.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -11742,7 +11742,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List skills available to this installation.",
+      "description": "List available skills.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

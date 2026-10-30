@@ -1,13 +1,8 @@
 use serde_json::json;
 use std::env;
 use std::fs;
-use std::fs::OpenOptions;
-use std::io::{self, Write};
-#[cfg(unix)]
-use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::color;
 
@@ -33,93 +28,6 @@ struct SkillInfo {
 ///
 /// Both are shipped in the npm package and searched by `discover_skills`.
 const SKILL_DIRS: &[&str] = &["skills", "skill-data"];
-
-#[derive(rust_embed::RustEmbed)]
-#[folder = "skill-assets/"]
-struct EmbeddedSkills;
-
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn publish_embedded_file(destination: &Path, data: &[u8]) -> io::Result<()> {
-    let parent = destination
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent"))?;
-    let (temp_path, mut temp_file) = loop {
-        let temp_path = parent.join(format!(
-            ".agent-browser-{}-{}.tmp",
-            std::process::id(),
-            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-        {
-            Ok(file) => break (temp_path, file),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    };
-    let write_result = temp_file
-        .write_all(data)
-        .and_then(|()| temp_file.sync_all());
-    drop(temp_file);
-    let result = write_result.and_then(|()| match fs::rename(&temp_path, destination) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && destination.is_file() => {
-            Ok(())
-        }
-        Err(error) => Err(error),
-    });
-    let _ = fs::remove_file(temp_path);
-    result
-}
-
-fn materialize_embedded_skills(skills_dir: &Path) -> Option<PathBuf> {
-    for file in EmbeddedSkills::iter() {
-        let file = file.as_ref();
-        let destination = skills_dir.join(file);
-        if destination.is_file() {
-            continue;
-        }
-        fs::create_dir_all(destination.parent()?).ok()?;
-        publish_embedded_file(&destination, &EmbeddedSkills::get(file)?.data).ok()?;
-    }
-    Some(skills_dir.to_path_buf())
-}
-
-fn bundled_skills_dir(cache_dir: Option<PathBuf>, temp_dir: PathBuf) -> Option<PathBuf> {
-    let skills_path = |root: &Path| {
-        root.join("agent-browser")
-            .join(env!("CARGO_PKG_VERSION"))
-            .join("skills")
-    };
-    cache_dir
-        .and_then(|root| materialize_embedded_skills(&skills_path(&root)))
-        .or_else(|| materialize_private_temp_skills(&temp_dir))
-}
-
-fn materialize_private_temp_skills(temp_dir: &Path) -> Option<PathBuf> {
-    let mut random = [0; 16];
-    getrandom::getrandom(&mut random).ok()?;
-    let private_root = temp_dir.join(format!(
-        "agent-browser-{}-{}",
-        env!("CARGO_PKG_VERSION"),
-        hex::encode(random)
-    ));
-    let mut builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    builder.mode(0o700);
-    builder.create(&private_root).ok()?;
-
-    let skills_dir = private_root.join("skills");
-    if let Some(skills_dir) = materialize_embedded_skills(&skills_dir) {
-        Some(skills_dir)
-    } else {
-        let _ = fs::remove_dir_all(private_root);
-        None
-    }
-}
 
 /// Locate the package root that contains the skill directories.
 ///
@@ -155,8 +63,7 @@ fn find_package_root() -> Option<PathBuf> {
     None
 }
 
-/// Collect skill directories to search, respecting the env var override.
-/// Uses bundled core files when package discovery cannot provide them.
+/// Collect skill directories, falling back to `~/.agent-browser` when package discovery fails.
 fn find_skills_dirs() -> Vec<PathBuf> {
     // Env var override: single directory, used as-is
     if let Ok(dir) = env::var("AGENT_BROWSER_SKILLS_DIR") {
@@ -166,23 +73,17 @@ fn find_skills_dirs() -> Vec<PathBuf> {
         }
     }
 
-    let mut dirs: Vec<PathBuf> = find_package_root()
-        .map(|root| {
-            SKILL_DIRS
-                .iter()
-                .map(|d| root.join(d))
-                .filter(|p| p.is_dir())
-                .collect()
-        })
-        .unwrap_or_default();
+    let Some(root) =
+        find_package_root().or_else(|| dirs::home_dir().map(|home| home.join(".agent-browser")))
+    else {
+        return vec![];
+    };
 
-    if !dirs.iter().any(|dir| dir.join("core/SKILL.md").is_file()) {
-        if let Some(dir) = bundled_skills_dir(dirs::cache_dir(), env::temp_dir()) {
-            dirs.push(dir);
-        }
-    }
-
-    dirs
+    SKILL_DIRS
+        .iter()
+        .map(|d| root.join(d))
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 /// Parse YAML frontmatter from a SKILL.md file. Returns (name, description, hidden).
@@ -534,13 +435,13 @@ pub fn run_skills(args: &[String], json_mode: bool) {
                 "{}",
                 serde_json::to_string(&json!({
                     "success": false,
-                    "error": "Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                    "error": "Skills directory not found. Install skills under ~/.agent-browser/ or set AGENT_BROWSER_SKILLS_DIR.",
                 }))
                 .unwrap_or_default()
             );
         } else {
             eprintln!(
-                "{} Skills directory not found. Set AGENT_BROWSER_SKILLS_DIR or reinstall via npm.",
+                "{} Skills directory not found. Install skills under ~/.agent-browser/ or set AGENT_BROWSER_SKILLS_DIR.",
                 color::error_indicator()
             );
         }
@@ -590,116 +491,7 @@ pub fn run_skills(args: &[String], json_mode: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use std::fs;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn materializes_bundled_core_skill_files() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let skills_dir = materialize_embedded_skills(&temp_dir.path().join("skills")).unwrap();
-
-        for file in [
-            "core/SKILL.md",
-            "core/references/commands.md",
-            "core/templates/form-automation.sh",
-        ] {
-            assert!(skills_dir.join(file).is_file());
-        }
-    }
-
-    #[test]
-    fn temp_fallback_uses_a_fresh_private_directory() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let cache_root = temp_dir.path().join("cache");
-        fs::write(&cache_root, "unusable").unwrap();
-        let skills_dir =
-            bundled_skills_dir(Some(cache_root.clone()), temp_dir.path().to_path_buf()).unwrap();
-        let another_skills_dir =
-            bundled_skills_dir(Some(cache_root), temp_dir.path().to_path_buf()).unwrap();
-
-        assert_ne!(skills_dir, another_skills_dir);
-        #[cfg(unix)]
-        assert_eq!(
-            fs::metadata(skills_dir.parent().unwrap())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        for file in [
-            "core/SKILL.md",
-            "core/references/commands.md",
-            "core/templates/form-automation.sh",
-        ] {
-            assert!(skills_dir.join(file).is_file());
-        }
-    }
-
-    #[test]
-    fn concurrent_embedded_file_publication_keeps_a_complete_file() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let destination = temp_dir.path().join("skill.md");
-        let contents = [
-            b"first complete version".to_vec(),
-            b"second complete version".to_vec(),
-        ];
-        let workers: Vec<_> = contents
-            .iter()
-            .cloned()
-            .map(|content| {
-                let destination = destination.clone();
-                std::thread::spawn(move || publish_embedded_file(&destination, &content).unwrap())
-            })
-            .collect();
-        for worker in workers {
-            worker.join().unwrap();
-        }
-
-        let published = fs::read(&destination).unwrap();
-        assert!(contents.contains(&published));
-        assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn embedded_core_skills_match_canonical_files() {
-        fn collect_files(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
-            for entry in fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    collect_files(root, &path, files);
-                } else if path.is_file() {
-                    files.insert(
-                        path.strip_prefix(root).unwrap().to_path_buf(),
-                        fs::read(path).unwrap(),
-                    );
-                }
-            }
-        }
-
-        let canonical = Path::new(env!("CARGO_MANIFEST_DIR")).join("../skill-data/core");
-        if !canonical.is_dir() {
-            return;
-        }
-
-        let mut canonical_files = BTreeMap::new();
-        collect_files(&canonical, &canonical, &mut canonical_files);
-
-        let mut embedded_files = BTreeMap::new();
-        for file in EmbeddedSkills::iter() {
-            let file = file.as_ref();
-            if let Some(relative) = file.strip_prefix("core/") {
-                embedded_files.insert(
-                    PathBuf::from(relative),
-                    EmbeddedSkills::get(file).unwrap().data.to_vec(),
-                );
-            }
-        }
-
-        assert_eq!(embedded_files, canonical_files);
-    }
 
     fn create_test_skill(dir: &Path, name: &str, description: &str) {
         let skill_dir = dir.join(name);

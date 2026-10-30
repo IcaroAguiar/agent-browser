@@ -1865,14 +1865,14 @@ fn parity_tools() -> Vec<Value> {
         tool(
             TOOL_SKILLS_LIST,
             "Skills list",
-            "List skills available to this installation.",
+            "List available skills.",
             json!({}),
             &[],
         ),
         tool(
             TOOL_SKILLS_GET,
             "Skills get",
-            "Get skill content by name. Standalone and Cargo-installed binaries include core; set full to include its references and templates.",
+            "Get skill content, including home-directory skills when no package root is found.",
             json!({ "names": string_array_schema("Skill names."), "all": { "type": "boolean" }, "full": { "type": "boolean" } }),
             &[],
         ),

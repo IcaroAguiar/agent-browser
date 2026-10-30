@@ -567,9 +567,9 @@ Use comma-separated origins only when each is a trusted dashboard URL. Every ori
 
 ## Full reference
 
-Standalone binaries and binaries installed with `cargo install agent-browser` include the `core` skill for `agent-browser skills get core`. Add `--full` to include its references and templates. npm installations read skills from the installed package's `skills/` and `skill-data/` directories. Set `AGENT_BROWSER_SKILLS_DIR` to a directory containing skill folders to override the default lookup.
+When no package root is found, the CLI reads manually installed skills from `~/.agent-browser/skills` and `~/.agent-browser/skill-data`.
 
-Use `--full` to include this guide's references and templates:
+Everything covered here plus the complete command/flag/env listing:
 
 ```bash
 agent-browser skills get core --full

@@ -3738,7 +3738,7 @@ Environment:
 
         "skills" => {
             r##"
-agent-browser skills - List and retrieve available skill content
+agent-browser skills - List and retrieve bundled skill content
 
 Usage: agent-browser skills [subcommand] [options]
 
@@ -3752,21 +3752,24 @@ Subcommands:
 Options:
   --json                     Output as JSON
 
-The npm package reads skills from its skills/ and skill-data/ directories.
-Standalone binaries and Cargo-installed binaries include the core skill.
-Use --full to include the core skill's references and templates.
+The skills command serves bundled skill content that always matches the
+installed CLI version. Agents should use this to get current instructions
+rather than relying on cached copies.
+When no package root is found, the CLI reads manually installed skills from ~/.agent-browser/skills and ~/.agent-browser/skill-data.
 
 Examples:
   agent-browser skills
   agent-browser skills list
   agent-browser skills get core
   agent-browser skills get core --full
+  agent-browser skills get protected-vercel-deployments
+  agent-browser skills get electron --full
   agent-browser skills get --all
   agent-browser skills path core
   agent-browser skills list --json
 
 Environment:
-  AGENT_BROWSER_SKILLS_DIR   Directory containing skill folders; overrides the default lookup
+  AGENT_BROWSER_SKILLS_DIR   Override the skills directory path
 "##
         }
 
@@ -3855,14 +3858,16 @@ Usage: agent-browser <command> [args] [options]
 Start here (for AI agents):
   agent-browser skills get core --full
 
-  Standalone and Cargo-installed binaries include the core skill. npm
-  installations read skills from the package's skills/ and skill-data/
-  directories. Use --full to include the core skill's references and templates.
+  Skills ship with the CLI (always version-matched) and include workflow
+  patterns, ref/selector usage, and copy-paste examples. Prefer this over
+  guessing commands from flag docs alone. Specialized skills cover Electron
+  apps, Slack, exploratory testing, protected Vercel deployments, and cloud
+  browser providers.
 
   skills [list]                List available skills
   skills get core              Core usage guide (overview + common patterns)
   skills get core --full       Include full command reference and templates
-  skills get <name>            Load a skill available in this installation
+  skills get <name>            Load a specialized skill (electron, slack, ...)
   skills path [name]           Print skill directory path
 
 Core Commands:
