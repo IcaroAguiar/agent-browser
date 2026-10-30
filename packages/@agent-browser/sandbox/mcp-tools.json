@@ -6002,6 +6002,7 @@
             "type": "boolean"
           },
           "withDeps": {
+            "description": "Install Linux system dependencies. The package manager runs directly as root; non-root uses sudo.",
             "type": "boolean"
           }
         },

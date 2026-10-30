@@ -2,6 +2,10 @@
 
 Complete reference for all agent-browser commands. For quick start and common patterns, see SKILL.md.
 
+## Linux dependencies
+
+On Linux, `agent-browser install --with-deps` installs system dependencies with the detected package manager. It runs that package manager directly as root and uses `sudo` for non-root users. If you are not root and `sudo` is unavailable, it reports that root privileges or `sudo` are required.
+
 ## Navigation
 
 ```bash

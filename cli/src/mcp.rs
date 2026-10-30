@@ -1947,7 +1947,7 @@ fn parity_tools() -> Vec<Value> {
             TOOL_INSTALL,
             "Install",
             "Install browser binaries.",
-            json!({ "withDeps": { "type": "boolean" } }),
+            json!({ "withDeps": { "type": "boolean", "description": "Install Linux system dependencies. The package manager runs directly as root; non-root uses sudo." } }),
             &[],
         ),
         tool(
@@ -3817,12 +3817,16 @@ fn call_dashboard_start(arguments: &Value) -> Result<Value, ProtocolError> {
     call_cli_tool(arguments, dashboard_start_args(arguments)?, None)
 }
 
-fn call_install(arguments: &Value) -> Result<Value, ProtocolError> {
+fn install_args(arguments: &Value) -> Result<Vec<String>, ProtocolError> {
     let mut args = vec!["install".to_string()];
     if optional_bool(arguments, "withDeps")?.unwrap_or(false) {
         args.push("--with-deps".to_string());
     }
-    call_cli_tool(arguments, args, None)
+    Ok(args)
+}
+
+fn call_install(arguments: &Value) -> Result<Value, ProtocolError> {
+    call_cli_tool(arguments, install_args(arguments)?, None)
 }
 
 fn call_chat(arguments: &Value) -> Result<Value, ProtocolError> {
@@ -4736,6 +4740,14 @@ mod tests {
         assert_eq!(
             doctor_args(&json!({ "debug": true })).unwrap(),
             vec!["doctor", "--debug", "true"]
+        );
+    }
+
+    #[test]
+    fn install_args_maps_with_deps_to_cli_flag() {
+        assert_eq!(
+            install_args(&json!({ "withDeps": true })).unwrap(),
+            vec!["install", "--with-deps"]
         );
     }
 
