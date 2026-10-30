@@ -485,6 +485,13 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
 
+    #[test]
+    fn parse_content_length_handles_spacing_case_and_unicode_header_values() {
+        let headers = "POST / HTTP/1.1\r\nX-Label: café\r\ncOnTeNt-LeNgTh:\t5 \r\n\r\n";
+
+        assert_eq!(parse_content_length(headers), Some(5));
+    }
+
     async fn send_request_to_handler(request: &str, session_name: &str) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
