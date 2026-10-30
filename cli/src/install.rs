@@ -182,7 +182,78 @@ fn platform_key() -> &'static str {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn validate_macos_version(version: &str) -> Result<(), String> {
+    let parts = version.split('.').collect::<Vec<_>>();
+    let parts = parts
+        .iter()
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(());
+            }
+            part.parse::<u32>().map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+        .filter(|parts| matches!(parts.len(), 2 | 3))
+        .ok_or_else(|| {
+            format!(
+                "Could not parse macOS version `{}`. Expected a numeric version such as 13.0.0.",
+                version
+            )
+        })?;
+
+    if parts[0] < 13 {
+        return Err(format!(
+            "Chrome installation requires macOS 13 or newer; detected macOS {}. Update macOS or install Chrome manually from https://www.google.com/chrome/.",
+            version
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn check_macos_version() -> Result<(), String> {
+    let output = Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .map_err(|e| {
+            format!(
+                "Could not run `sw_vers -productVersion`: {}. Ensure macOS system utilities are available.",
+                e
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", stderr.trim())
+        };
+        return Err(format!(
+            "`sw_vers -productVersion` failed with {}{}. Ensure it succeeds to detect the macOS version.",
+            output.status, detail
+        ));
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout);
+    let version = version.trim();
+    if version.is_empty() {
+        return Err(
+            "`sw_vers -productVersion` returned no version. Ensure it prints a version such as 13.0.0."
+                .to_string(),
+        );
+    }
+
+    validate_macos_version(version)
+}
+
 async fn fetch_download_url() -> Result<(String, String), String> {
+    #[cfg(target_os = "macos")]
+    check_macos_version()?;
+
     let client = http_client()?;
     let resp = client
         .get(LAST_KNOWN_GOOD_URL)
@@ -866,6 +937,21 @@ mod tests {
         let request = String::from_utf8_lossy(&buf[..n]).to_string();
         s.write_all(response).await.unwrap();
         request
+    }
+
+    #[test]
+    fn validate_macos_version_checks_minimum_and_rejects_malformed_versions() {
+        assert!(validate_macos_version("12.7.6")
+            .unwrap_err()
+            .contains("13 or newer"));
+        assert!(validate_macos_version("13.0.0").is_ok());
+        assert!(validate_macos_version("15.4").is_ok());
+        assert!(validate_macos_version("26.1").is_ok());
+        for malformed in ["", "15.", ".4", "15.4.1.2", "not.a.version"] {
+            assert!(validate_macos_version(malformed)
+                .unwrap_err()
+                .contains("Could not parse macOS version"));
+        }
     }
 
     #[test]
