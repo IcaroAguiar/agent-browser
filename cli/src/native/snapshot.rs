@@ -1352,6 +1352,7 @@ fn render_tree(
     }
 }
 
+/// Remove empty structure while retaining visible text in noninteractive snapshots.
 fn compact_tree(tree: &str, interactive: bool) -> String {
     let lines: Vec<&str> = tree.lines().collect();
     if lines.is_empty() {
@@ -1361,7 +1362,7 @@ fn compact_tree(tree: &str, interactive: bool) -> String {
     let mut keep = vec![false; lines.len()];
 
     for (i, line) in lines.iter().enumerate() {
-        if line.contains("ref=") || line.contains(": ") {
+        if line.contains("ref=") || line.contains(": ") || (!interactive && line.contains(" \"")) {
             keep[i] = true;
             // Mark ancestors
             let my_indent = count_indent(line);
