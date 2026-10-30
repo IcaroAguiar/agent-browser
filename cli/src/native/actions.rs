@@ -18701,7 +18701,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(path.ends_with(".har"));
         assert!(std::path::Path::new(path).starts_with(get_har_dir()));
         assert_eq!(result["requestCount"], 1);
-        assert!(state.har_recording);
+        assert!(!state.har_recording);
         assert!(state.har_entries.is_empty());
 
         let har: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
@@ -18760,12 +18760,9 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         );
         assert_eq!(state.har_body_total_bytes, 123);
 
-        let result = handle_har_stop(
-            &json!({ "path": valid_path.to_string_lossy() }),
-            &mut state,
-        )
-        .await
-        .unwrap();
+        let result = handle_har_stop(&json!({ "path": valid_path.to_string_lossy() }), &mut state)
+            .await
+            .unwrap();
 
         assert_eq!(result["path"], valid_path.to_string_lossy().as_ref());
         assert_eq!(result["requestCount"], 1);
