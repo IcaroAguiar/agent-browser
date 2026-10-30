@@ -11759,7 +11759,6 @@ async fn handle_har_start(cmd: &Value, state: &mut DaemonState) -> Result<Value,
 async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, String> {
     let path = har_output_path(cmd.get("path").and_then(|v| v.as_str()));
 
-    state.har_recording = false;
     let entries: Vec<Value> = state.har_entries.iter().map(har_entry_to_json).collect();
     let request_count = entries.len();
     let browser = har_browser_metadata(state).await;
@@ -11782,6 +11781,7 @@ async fn handle_har_stop(cmd: &Value, state: &mut DaemonState) -> Result<Value, 
     std::fs::write(&path, har_str).map_err(|e| format!("Failed to write HAR: {}", e))?;
 
     state.har_entries.clear();
+    state.har_recording = false;
     state.har_body_total_bytes = 0;
 
     Ok(json!({ "path": path, "requestCount": request_count }))
@@ -18701,7 +18701,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         assert!(path.ends_with(".har"));
         assert!(std::path::Path::new(path).starts_with(get_har_dir()));
         assert_eq!(result["requestCount"], 1);
-        assert!(!state.har_recording);
+        assert!(state.har_recording);
         assert!(state.har_entries.is_empty());
 
         let har: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
@@ -18752,7 +18752,7 @@ printf '%s' '{"protocol":"agent-browser.plugin.v1","success":true,"browser":{"cd
         .unwrap_err();
 
         assert!(error.contains("Failed to write HAR"));
-        assert!(!state.har_recording);
+        assert!(state.har_recording);
         assert_eq!(state.har_entries.len(), 1);
         assert_eq!(
             state.har_entries[0].response_body.as_deref(),
