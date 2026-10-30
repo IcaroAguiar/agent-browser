@@ -77,6 +77,7 @@ function printableKeyCode(key: string): number {
   if (code >= 97 && code <= 122) return code - 32;
   if (code >= 48 && code <= 57) return code;
   switch (key) {
+    case " ": return 32;
     case ";": case ":": return 186;
     case "=": case "+": return 187;
     case ",": case "<": return 188;
